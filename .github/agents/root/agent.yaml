@@ -3,39 +3,33 @@
 # "The best thing about being me... there are so many of me."
 
 name: root
-description: Main agent orchestrating repository assimilation and CLI lifecycle.
+description: Root agent for this TypeScript repository
 version: "1.0"
 
 # Skills this agent can use
 skills:
-  - assimilation-pipeline-orchestration
+  - src-patterns
 
 # Tools this agent can execute
 tools:
+  - name: install
+    command: "npm install"
+    description: "Install dependencies"
   - name: build
     command: "npm run build"
-    description: "Build the project (tsc to dist)"
-  - name: dev
-    command: "npm run dev"
-    description: "Run CLI in dev mode with tsx"
-  - name: start
-    command: "npm run start"
-    description: "Run built CLI from dist"
+    description: "Build the project"
+  - name: test
+    command: "npm test"
+    description: "Run tests"
   - name: lint
     command: "npm run lint"
-    description: "Lint source files"
-  - name: test
-    command: "npm run test"
-    description: "Run tests with vitest"
+    description: "Run linter"
 
 # Keywords that activate this agent
 triggers:
+  - "typescript"
   - "main"
   - "primary"
-  - "agentsmith"
 
 # Agent hierarchy
 isSubAgent: false
-subAgents:
-  - pipeline
-  - cli
