@@ -3,53 +3,18 @@
  * Uses GitHub Copilot SDK with GitHub API for file access
  */
 
-import { CopilotClient } from "@github/copilot-sdk";
-import { GitHubClient, GitHubFile } from "../github/index.js";
-
-export interface RemoteSkill {
-  name: string;
-  description: string;
-  sourceDir: string;
-  patterns: string[];
-  triggers: string[];
-  category: string;
-  examples: string[];
-}
-
-export interface RemoteAgent {
-  name: string;
-  description: string;
-  skills: string[];
-  tools: { name: string; command: string; description: string }[];
-  isSubAgent: boolean;
-  parentAgent?: string;
-  subAgents?: string[];
-  triggers: string[];
-  sourceDir?: string;
-}
-
-export interface RemoteHook {
-  name: string;
-  event: "pre-commit" | "post-commit" | "pre-push" | "pre-analyze" | "post-generate";
-  description: string;
-  commands: string[];
-  condition?: string;
-}
-
-export interface RemoteAnalysisResult {
-  skills: RemoteSkill[];
-  agents: RemoteAgent[];
-  tools: { name: string; command: string; description: string }[];
-  hooks: RemoteHook[];
-  summary: string;
-  repo: {
-    owner: string;
-    repo: string;
-    license?: string;
-    language: string;
-    framework?: string;
-  };
-}
+import { CopilotClient, approveAll } from "@github/copilot-sdk";
+import type { GitHubFile } from "../github/index.js";
+import { GitHubClient } from "../github/index.js";
+import type { AnalysisResult, SkillDefinition, AgentDefinition } from "./types.js";
+import {
+  flattenAgents,
+  extractAllTools,
+  generateDefaultHooks,
+  getDefaultTools,
+  parseAnalysisResponse,
+  generateDefaultSkills,
+} from "./core.js";
 
 // Files/dirs to ignore
 const IGNORE_PATTERNS = [
@@ -88,12 +53,12 @@ export class RemoteAnalyzer {
     this.github = new GitHubClient(repoUrl, verbose);
   }
 
-  async analyze(): Promise<RemoteAnalysisResult> {
+  async analyze(): Promise<AnalysisResult> {
     // Get repo info and file tree from GitHub API
     if (this.verbose) {
       console.log(`  [GH] Fetching repo info for ${this.github.fullName}...`);
     }
-    
+
     const repoInfo = await this.github.getRepoInfo();
     const tree = await this.github.getTree();
 
@@ -102,9 +67,9 @@ export class RemoteAnalyzer {
     }
 
     // Filter files
-    const files = tree.filter(f => 
-      f.type === "file" && 
-      !IGNORE_PATTERNS.some(p => p.test(f.path))
+    const files = tree.filter(f =>
+      f.type === "file" &&
+      !IGNORE_PATTERNS.some(p => p.test(f.path)),
     );
 
     // Detect language from file extensions
@@ -117,7 +82,7 @@ export class RemoteAnalyzer {
 
     // Get priority files for analysis
     const priorityPaths = this.selectPriorityFiles(files);
-    
+
     if (this.verbose) {
       console.log(`  [GH] Fetching ${priorityPaths.length} priority files...`);
     }
@@ -152,6 +117,7 @@ export class RemoteAnalyzer {
         systemMessage: {
           content: this.getSystemPrompt(),
         },
+        onPermissionRequest: approveAll,
       });
 
       if (this.verbose) {
@@ -161,7 +127,7 @@ export class RemoteAnalyzer {
       let responseContent = "";
       let streamedContent = "";
       let eventCount = 0;
-      
+
       const done = new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
           if (this.verbose) {
@@ -212,7 +178,7 @@ export class RemoteAnalyzer {
       const finalContent = responseContent || streamedContent;
 
       // Parse response
-      return this.parseResponse(finalContent, repoInfo, language, framework, files);
+      return this.buildResult(finalContent, repoInfo, language, framework);
 
     } catch (error) {
       console.error(`  [SDK] Error: ${(error as Error).message}`);
@@ -262,21 +228,21 @@ export class RemoteAnalyzer {
 
   private detectFramework(files: GitHubFile[]): string | undefined {
     const paths = new Set(files.map(f => f.path));
-    
+
     if (paths.has("next.config.js") || paths.has("next.config.mjs")) return "Next.js";
     if (paths.has("angular.json")) return "Angular";
     if (paths.has("vue.config.js")) return "Vue";
     if (paths.has("nuxt.config.ts") || paths.has("nuxt.config.js")) return "Nuxt";
-    
+
     return undefined;
   }
 
   private selectPriorityFiles(files: GitHubFile[]): string[] {
     const maxFiles = 15;
     const maxSize = 50000; // 50KB max per file
-    
+
     const priority: string[] = [];
-    
+
     // Config files first
     for (const cfg of CONFIG_FILES) {
       const match = files.find(f => f.path === cfg || f.path.endsWith("/" + cfg));
@@ -315,17 +281,17 @@ Respond in valid JSON only. No markdown, no explanation.`;
   }
 
   private buildPrompt(
-    files: GitHubFile[], 
+    files: GitHubFile[],
     contents: Map<string, string>,
     language: string,
-    framework?: string
+    framework?: string,
   ): string {
     const fileList = files.slice(0, 100).map(f => f.path).join("\n");
 
     let samples = "";
-    for (const [path, content] of contents) {
+    for (const [filePath, content] of contents) {
       if (content) {
-        samples += `\n--- ${path} ---\n${content.slice(0, 5000)}\n`;
+        samples += `\n--- ${filePath} ---\n${content.slice(0, 5000)}\n`;
       }
     }
 
@@ -363,7 +329,7 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
           "triggers": ["cmd", "cli", "commands"]
         },
         {
-          "name": "api-agent", 
+          "name": "api-agent",
           "description": "Handles API endpoints",
           "skills": ["api-patterns"],
           "tools": ["curl localhost:8080/health"],
@@ -378,176 +344,46 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
 }`;
   }
 
-  private parseResponse(
+  private buildResult(
     response: string,
     repo: { owner: string; repo: string; license?: string },
     language: string,
     framework: string | undefined,
-    files: GitHubFile[]
-  ): RemoteAnalysisResult {
-    try {
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("No JSON");
+  ): AnalysisResult {
+    const parsed = parseAnalysisResponse(response, () => null);
 
-      const parsed = JSON.parse(jsonMatch[0]);
-
-      // Flatten nested sub-agents into the agents array
-      const flatAgents = this.flattenAgents(parsed.agents || []);
-
+    if (parsed === null) {
+      // Will not happen in the fallback path, but this handles parse failure
       return {
-        skills: parsed.skills || [],
-        agents: flatAgents,
-        tools: this.extractTools(flatAgents),
-        hooks: this.generateHooks(language),
-        summary: parsed.summary || "",
+        repoName: repo.repo,
+        skills: [],
+        agents: [],
+        tools: [],
+        hooks: generateDefaultHooks(language, false),
+        summary: "",
         repo: { ...repo, language, framework },
       };
-    } catch {
-      return this.generateFallback(repo, language, framework, files);
-    }
-  }
-
-  /**
-   * Flatten nested sub-agents into a flat array.
-   * The SDK may return sub-agents as objects inside parent.subAgents[].
-   * We need them as separate entries in the agents array.
-   */
-  private flattenAgents(agents: unknown[]): RemoteAgent[] {
-    const result: RemoteAgent[] = [];
-
-    for (const rawAgent of agents) {
-      if (!rawAgent || typeof rawAgent !== "object") continue;
-      
-      const agent = rawAgent as Record<string, unknown>;
-      
-      // Extract nested sub-agent objects
-      const nestedSubAgents: unknown[] = [];
-      const subAgentNames: string[] = [];
-
-      const subAgentsArray = agent.subAgents as unknown[];
-      if (Array.isArray(subAgentsArray) && subAgentsArray.length > 0) {
-        for (const subAgent of subAgentsArray) {
-          if (typeof subAgent === "object" && subAgent !== null && "name" in subAgent) {
-            // It's a nested agent object - extract it
-            const nestedAgent = subAgent as Record<string, unknown>;
-            nestedAgent.isSubAgent = true;
-            nestedAgent.parentAgent = agent.name as string;
-            nestedSubAgents.push(nestedAgent);
-            subAgentNames.push(nestedAgent.name as string);
-          } else if (typeof subAgent === "string") {
-            // It's just a name reference
-            subAgentNames.push(subAgent);
-          }
-        }
-      }
-
-      // Build normalized agent
-      const normalizedAgent: RemoteAgent = {
-        name: String(agent.name || "unknown"),
-        description: String(agent.description || ""),
-        skills: Array.isArray(agent.skills) ? agent.skills.map(s => String(s)) : [],
-        tools: this.normalizeTools(agent.tools),
-        isSubAgent: Boolean(agent.isSubAgent),
-        parentAgent: agent.parentAgent ? String(agent.parentAgent) : undefined,
-        subAgents: subAgentNames.length > 0 ? subAgentNames : undefined,
-        triggers: Array.isArray(agent.triggers) ? agent.triggers.map(t => String(t)) : [],
-        sourceDir: agent.sourceDir ? String(agent.sourceDir) : undefined,
-      };
-
-      result.push(normalizedAgent);
-
-      // Recursively flatten any nested sub-agents
-      if (nestedSubAgents.length > 0) {
-        result.push(...this.flattenAgents(nestedSubAgents));
-      }
     }
 
-    return result;
-  }
+    const flatAgents = flattenAgents(parsed.agents);
 
-  /**
-   * Normalize tools to standard format.
-   * SDK may return tools as strings or objects.
-   */
-  private normalizeTools(tools: unknown): { name: string; command: string; description: string }[] {
-    if (!tools || !Array.isArray(tools)) {
-      return [];
-    }
-
-    return tools.map((tool) => {
-      if (typeof tool === "string") {
-        return {
-          name: tool.split(" ")[0],
-          command: tool,
-          description: tool,
-        };
-      }
-      if (typeof tool === "object" && tool !== null) {
-        const t = tool as Record<string, unknown>;
-        return {
-          name: String(t.name || "unknown"),
-          command: String(t.command || t.name || ""),
-          description: String(t.description || t.name || ""),
-        };
-      }
-      return {
-        name: "unknown",
-        command: String(tool),
-        description: String(tool),
-      };
-    });
-  }
-
-  private extractTools(agents: RemoteAgent[]): { name: string; command: string; description: string }[] {
-    const tools: { name: string; command: string; description: string }[] = [];
-    for (const agent of agents) {
-      if (agent.tools) tools.push(...agent.tools);
-    }
-    return tools;
-  }
-
-  private generateHooks(language: string): RemoteHook[] {
-    const hooks: RemoteHook[] = [];
-
-    if (language === "TypeScript" || language === "JavaScript") {
-      hooks.push({
-        name: "pre-commit-quality",
-        event: "pre-commit",
-        description: "Run linting before commit",
-        commands: ["npm run lint", "npm run build"],
-      });
-    } else if (language === "Python") {
-      hooks.push({
-        name: "pre-commit-quality",
-        event: "pre-commit",
-        description: "Run linting before commit",
-        commands: ["ruff check .", "ruff format --check ."],
-      });
-    } else if (language === "Go") {
-      hooks.push({
-        name: "pre-commit-quality",
-        event: "pre-commit",
-        description: "Run linting before commit",
-        commands: ["go fmt ./...", "golangci-lint run"],
-      });
-    }
-
-    hooks.push({
-      name: "post-generate-validate",
-      event: "post-generate",
-      description: "Validate generated assets",
-      commands: ["npx agentsmith validate"],
-    });
-
-    return hooks;
+    return {
+      repoName: repo.repo,
+      skills: parsed.skills as SkillDefinition[],
+      agents: flatAgents,
+      tools: extractAllTools(flatAgents),
+      hooks: generateDefaultHooks(language, false),
+      summary: parsed.summary,
+      repo: { ...repo, language, framework },
+    };
   }
 
   private generateFallback(
     repo: { owner: string; repo: string; license?: string },
     language: string,
     framework: string | undefined,
-    files: GitHubFile[]
-  ): RemoteAnalysisResult {
+    files: GitHubFile[],
+  ): AnalysisResult {
     // Detect source directories
     const srcDirs = new Set<string>();
     for (const f of files) {
@@ -557,19 +393,10 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
       }
     }
 
-    const skills: RemoteSkill[] = Array.from(srcDirs).map(dir => ({
-      name: `${dir}-patterns`,
-      description: `Patterns from the ${dir} directory`,
-      sourceDir: dir,
-      patterns: [],
-      triggers: [dir],
-      category: "patterns",
-      examples: [],
-    }));
+    const skills: SkillDefinition[] = generateDefaultSkills(Array.from(srcDirs));
+    const tools = getDefaultTools(language);
 
-    const tools = this.getDefaultTools(language);
-
-    const agents: RemoteAgent[] = [{
+    const agents: AgentDefinition[] = [{
       name: "root",
       description: `Root agent for ${repo.owner}/${repo.repo}`,
       skills: skills.map(s => s.name),
@@ -580,33 +407,13 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
     }];
 
     return {
+      repoName: repo.repo,
       skills,
       agents,
       tools,
-      hooks: this.generateHooks(language),
+      hooks: generateDefaultHooks(language, false),
       summary: `A ${language} repository${framework ? ` using ${framework}` : ""}.`,
       repo: { ...repo, language, framework },
     };
-  }
-
-  private getDefaultTools(language: string): { name: string; command: string; description: string }[] {
-    if (language === "TypeScript" || language === "JavaScript") {
-      return [
-        { name: "install", command: "npm install", description: "Install dependencies" },
-        { name: "build", command: "npm run build", description: "Build" },
-        { name: "test", command: "npm test", description: "Run tests" },
-      ];
-    } else if (language === "Python") {
-      return [
-        { name: "install", command: "pip install -e .", description: "Install" },
-        { name: "test", command: "pytest", description: "Run tests" },
-      ];
-    } else if (language === "Go") {
-      return [
-        { name: "build", command: "go build ./...", description: "Build" },
-        { name: "test", command: "go test ./...", description: "Run tests" },
-      ];
-    }
-    return [];
   }
 }

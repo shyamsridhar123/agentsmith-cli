@@ -191,6 +191,17 @@ function identifyLicense(content: string): Omit<LicenseInfo, "file"> {
   };
 }
 
+/**
+ * Check if a given SPDX license ID is considered permissive.
+ * Useful for remote analysis where the SPDX ID comes from the GitHub API.
+ */
+export function isPermissiveLicense(spdxId: string | undefined | null): boolean {
+  if (!spdxId) return false;
+  return Object.keys(PERMISSIVE_LICENSES).some(
+    (key) => key.toLowerCase() === spdxId.toLowerCase(),
+  );
+}
+
 export function formatLicenseStatus(license: LicenseInfo): string {
   if (!license.detected) {
     return "No license detected";

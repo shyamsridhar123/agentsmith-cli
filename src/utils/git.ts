@@ -29,14 +29,14 @@ export function isGitHubUrl(input: string): boolean {
  * Normalize a GitHub URL to https format
  */
 export function normalizeGitHubUrl(input: string): string {
-  if (input.startsWith("github.com/")) {
-    return `https://${input}`;
-  }
-  if (input.startsWith("git@github.com:")) {
-    return input.replace("git@github.com:", "https://github.com/");
+  let url = input;
+  if (url.startsWith("github.com/")) {
+    url = `https://${url}`;
+  } else if (url.startsWith("git@github.com:")) {
+    url = url.replace("git@github.com:", "https://github.com/");
   }
   // Remove .git suffix if present
-  return input.replace(/\.git$/, "");
+  return url.replace(/\.git$/, "");
 }
 
 /**

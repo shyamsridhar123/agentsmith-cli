@@ -52,7 +52,7 @@ export class Registry {
         entries.push({
           type: "agent",
           name: agent.name,
-          file: `.github/agents/${agent.name}/agent.yaml`,
+          file: `.github/agents/${agent.name}.agent.md`,
           vsCodeAgent: `.github/agents/${agent.name}.agent.md`,
           description: agent.description,
           triggers: agent.triggers,

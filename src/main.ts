@@ -51,17 +51,22 @@ program
   .option("-n, --dry-run", "Preview what would be generated without writing files")
   .option("-v, --verbose", "Show detailed analysis output including file-by-file processing")
   .option("-o, --output <path>", "Output directory for generated assets")
+  .option("--no-instructions", "Skip generation of .github/copilot-instructions.md")
+  .option("--single-agent", "Generate a single agent.md instead of multi-agent constellation (v0.3 compat)")
   .addHelpText("after", `
 ${chalk.bold("Examples:")}
-  $ agentsmith assimilate .                                      # Local repository
+  $ agentsmith assimilate .                                      # Local repository (multi-agent)
   $ agentsmith assimilate ~/projects/myapp                       # Specific path
   $ agentsmith assimilate https://github.com/expressjs/express   # GitHub URL
   $ agentsmith assimilate . --dry-run                            # Preview mode
   $ agentsmith assimilate . -o ./output                          # Custom output
+  $ agentsmith assimilate . --single-agent                       # Single agent (v0.3 compat)
 
 ${chalk.bold("Generated assets:")}
+  .github/copilot-instructions.md  - Workspace-wide Copilot instructions
   .github/skills/<name>/SKILL.md   - Reusable skill definitions
-  .github/agents/<name>/agent.yaml - Agent configurations
+  .github/agents/<name>.agent.md   - Agent configurations (multi-agent constellation)
+  .github/copilot/handoffs.json    - Agent delegation graph
   .github/hooks/*.yaml             - Lifecycle hooks
   skills-registry.jsonl            - Searchable index
 `)

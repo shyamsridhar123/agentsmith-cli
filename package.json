@@ -1,7 +1,7 @@
 {
   "name": "agentsmith",
-  "version": "0.3.0",
-  "description": "Assimilate any repository into a fully autonomous GitHub Copilot agent",
+  "version": "0.4.0",
+  "description": "Turn any GitHub repo into a multi-agent AI system for VS Code Copilot. Generates orchestrators, sub-agents, skills, handoffs, and copilot-instructions.md.",
   "type": "module",
   "bin": {
     "agentsmith": "./bin/agentsmith.js"
@@ -25,7 +25,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@github/copilot-sdk": "^0.1.0",
+    "@github/copilot-sdk": "^0.1.33-preview.2",
     "chalk": "^5.3.0",
     "commander": "^12.0.0",
     "glob": "^10.3.0",

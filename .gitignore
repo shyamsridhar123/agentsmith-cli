@@ -9,6 +9,12 @@ node_modules/
 .vscode/
 .idea/
 
+# Local agent tooling
+.claude/
+.claude-flow/
+.swarm/
+.mcp.json
+
 # OS
 .DS_Store
 Thumbs.db

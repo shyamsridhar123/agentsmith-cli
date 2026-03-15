@@ -5,24 +5,20 @@
 
 import chalk from "chalk";
 import { Scanner } from "../scanner/index.js";
-import { Analyzer } from "../analyzer/index.js";
-import { RemoteAnalyzer } from "../analyzer/remote.js";
+import { Analyzer, RemoteAnalyzer } from "../analyzer/index.js";
 import { Generator } from "../generator/index.js";
 import { Registry } from "../registry/index.js";
 import { HookRunner } from "../hooks/index.js";
 import { isGitHubUrl, getRepoName } from "../utils/git.js";
+import { isPermissiveLicense } from "../utils/license.js";
 
 interface AssimilateOptions {
   dryRun?: boolean;
   verbose?: boolean;
   output?: string;
+  instructions?: boolean;
+  singleAgent?: boolean;
 }
-
-// Permissive licenses
-const PERMISSIVE_LICENSES = [
-  "MIT", "Apache-2.0", "GPL-2.0", "GPL-3.0", "LGPL-2.1", "LGPL-3.0",
-  "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Unlicense", "CC0-1.0",
-];
 
 export async function assimilateCommand(
   target: string,
@@ -38,19 +34,19 @@ export async function assimilateCommand(
     const result = await analyzer.analyze();
 
     if (options.verbose) {
-      console.log(chalk.gray(`  ├── Language: ${result.repo.language}`));
-      console.log(chalk.gray(`  ├── Framework: ${result.repo.framework || "None"}`));
-      console.log(chalk.gray(`  ├── License: ${result.repo.license || "Unknown"}`));
+      console.log(chalk.gray(`  ├── Language: ${result.repo?.language ?? "Unknown"}`));
+      console.log(chalk.gray(`  ├── Framework: ${result.repo?.framework || "None"}`));
+      console.log(chalk.gray(`  ├── License: ${result.repo?.license || "Unknown"}`));
       console.log(chalk.gray(`  └── Skills: ${result.skills.length}`));
     }
 
     // License check
     console.log(chalk.green("\n[LICENSE]"), "Checking repository license...");
-    const isPermissive = result.repo.license && PERMISSIVE_LICENSES.includes(result.repo.license);
+    const isPermissive = isPermissiveLicense(result.repo?.license);
 
     if (!isPermissive && !options.dryRun) {
       console.log(chalk.red("\n[BLOCKED]"), "Cannot assimilate repository.");
-      if (!result.repo.license) {
+      if (!result.repo?.license) {
         console.log(chalk.red("  No license detected."));
       } else {
         console.log(chalk.red(`  License "${result.repo.license}" is not permissive.`));
@@ -61,7 +57,7 @@ export async function assimilateCommand(
     }
 
     if (isPermissive) {
-      console.log(chalk.green(`  ✓ ${result.repo.license} - permissive license`));
+      console.log(chalk.green(`  ✓ ${result.repo?.license} - permissive license`));
     } else if (options.dryRun) {
       console.log(chalk.yellow("  ⚠ License not permissive - generation blocked without --dry-run"));
     }
@@ -75,15 +71,11 @@ export async function assimilateCommand(
     );
 
     // Generate
-    const generator = new Generator(outputPath, options.dryRun, options.verbose);
-    const generated = await generator.generate({
-      repoName: result.repo.repo,
-      skills: result.skills,
-      agents: result.agents,
-      tools: result.tools,
-      hooks: result.hooks,
-      summary: result.summary,
-    });
+    const generator = new Generator(
+      outputPath, options.dryRun, options.verbose,
+      options.instructions === false, options.singleAgent,
+    );
+    const generated = await generator.generate(result);
 
     for (const file of generated.files) {
       const icon = options.dryRun ? chalk.yellow("○") : chalk.green("✓");
@@ -103,9 +95,10 @@ export async function assimilateCommand(
     }
 
     // Summary
+    const agentCount = generated.files.filter(f => f.endsWith(".agent.md")).length;
     console.log(
       chalk.green("\n[COMPLETE]"),
-      `${result.skills.length} skills, 1 agent, ${result.hooks.length} hooks generated.`
+      `${result.skills.length} skills, ${agentCount} agent(s), ${result.hooks.length} hooks generated.`
     );
 
     if (options.dryRun) {
@@ -183,7 +176,10 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       options.dryRun ? "Preview of assets..." : `Writing assets to .github/...`
     );
 
-    const generator = new Generator(outputPath, options.dryRun, options.verbose);
+    const generator = new Generator(
+      outputPath, options.dryRun, options.verbose,
+      options.instructions === false, options.singleAgent,
+    );
     const generated = await generator.generate(analysisResult);
 
     for (const file of generated.files) {
@@ -200,9 +196,10 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       await hookRunner.execute("post-generate");
     }
 
+    const localAgentCount = generated.files.filter(f => f.endsWith(".agent.md")).length;
     console.log(
       chalk.green("\n[COMPLETE]"),
-      `${analysisResult.skills.length} skills, 1 agent, ${analysisResult.hooks.length} hooks generated.`
+      `${analysisResult.skills.length} skills, ${localAgentCount} agent(s), ${analysisResult.hooks.length} hooks generated.`
     );
 
     if (options.dryRun) {
