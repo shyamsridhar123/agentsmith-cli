@@ -11,6 +11,11 @@ import type { AnalysisResult, SkillDefinition, AgentDefinition, HookDefinition }
 import { buildCopilotInstructions, mergeWithExisting } from "./instructions-writer.js";
 import { buildRootAgentMd, buildSubAgentMd } from "./agent-writer.js";
 import { buildHandoffGraph, serializeHandoffGraph } from "./handoff-writer.js";
+import {
+  buildCoordinationSection,
+  buildSubAgentCoordination,
+  extendHandoffGraph,
+} from "./hub-writer.js";
 
 export interface GeneratorResult {
   files: string[];
@@ -22,6 +27,7 @@ export class Generator {
   private verbose: boolean;
   private noInstructions: boolean;
   private singleAgent: boolean;
+  private hubUrl?: string;
 
   constructor(
     rootPath: string,
@@ -29,12 +35,14 @@ export class Generator {
     verbose = false,
     noInstructions = false,
     singleAgent = false,
+    hubUrl?: string,
   ) {
     this.rootPath = rootPath;
     this.dryRun = dryRun;
     this.verbose = verbose;
     this.noInstructions = noInstructions;
     this.singleAgent = singleAgent;
+    this.hubUrl = hubUrl;
   }
 
   async generate(analysis: AnalysisResult): Promise<GeneratorResult> {
@@ -123,10 +131,16 @@ export class Generator {
         `${this.sanitizeAgentName(analysis.repoName)}-root`,
         helpers,
       );
+      if (this.hubUrl) {
+        content += "\n" + buildCoordinationSection(analysis.repoName, this.hubUrl);
+      }
     } else {
       // Domain sub-agent
       fileName = `${this.sanitizeAgentName(agent.name)}.agent.md`;
       content = buildSubAgentMd(agent, analysis.skills, helpers);
+      if (this.hubUrl) {
+        content += "\n" + buildSubAgentCoordination(agent.name, analysis.repoName, this.hubUrl);
+      }
     }
 
     const mdFile = path.join(agentsDir, fileName);
@@ -148,7 +162,10 @@ export class Generator {
     const relativePath = ".github/copilot/handoffs.json";
 
     const graph = buildHandoffGraph(agents);
-    const content = serializeHandoffGraph(graph);
+    const finalGraph = this.hubUrl
+      ? extendHandoffGraph(graph, this.hubUrl, agents[0]?.parentAgent || "repo")
+      : graph;
+    const content = serializeHandoffGraph(finalGraph as ReturnType<typeof buildHandoffGraph>);
 
     if (!this.dryRun) {
       await fs.mkdir(copilotDir, { recursive: true });
