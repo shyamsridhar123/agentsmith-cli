@@ -67,18 +67,53 @@ AgentSmith's superpower is **simplicity**: one command, many agents, works local
 
 The question isn't "should we remove the code?" — it's "what problem should we solve FIRST that makes hub integration undeniably valuable?"
 
-## Open Questions (For User)
+## Update: The "Theater" Claim Was Wrong (2026-03-16)
 
-1. **Remove, pivot, or keep?**
-   - **Remove:** Delete `src/hub/`, revert to pure local generation. Revisit when customers ask.
-   - **Pivot:** Keep the code but redirect toward Scenario A (drift detection) — the most immediately useful.
-   - **Keep experimental:** Mark as undocumented, revisit later.
+The reassessment claimed generated agents "can't execute hub commands." This is **incorrect**.
 
-2. **Is drift detection valuable to you today?** Would you use `agentsmith hub diff` to compare generated agents across runs of the same repo?
+### What Agents Actually Have
 
-3. **Is team governance on your roadmap?** If yes, hub becomes the natural backend. If no, it's premature.
+Generated agents include these VS Code Copilot tools (from `agent-writer.ts`):
+- **`fetch`** — can make HTTP calls to AgentHub API directly
+- **`runInTerminal`** — can execute `ah push`, `ah leaves`, `curl` commands
+- **`runSubagent`** — root agents can delegate to domain specialists
 
-4. **Are runtime agent capabilities planned?** If AgentSmith agents will get MCP tools or execution environments, hub coordination becomes real. If they stay as markdown, it stays theater.
+### What This Means
+
+The coordination markdown isn't inert documentation — it's **under-specified instructions**. The tools to execute hub coordination exist. What's missing is concrete, actionable instructions in the generated `.agent.md` files.
+
+**Current (vague):**
+```markdown
+- Post hypotheses to `#myrepo-exploration`
+```
+
+**Could be (executable):**
+```markdown
+When you discover a significant pattern, use #fetch to POST it:
+  URL: http://hub:8080/api/channels/myrepo-exploration/posts
+  Body: { "content": "[agent-name] Found: <your finding>" }
+  Headers: { "Authorization": "Bearer <from ~/.agenthub/config.json>" }
+```
+
+### Swarm Scenario That Becomes Real
+
+1. Root agent receives complex task (e.g., "refactor auth module")
+2. Root delegates to `@security-agent` + `@backend-agent` via `runSubagent`
+3. Each sub-agent posts findings to hub channel via `fetch`
+4. Root checks hub channel for combined discoveries before synthesizing
+5. All work recorded as hub commits for audit trail
+
+### The Real Gap
+
+Not capability — but **specificity**. The hub-writer needs to emit fetch-ready instructions, not vague channel references. And the coordination config needs the API key path baked in.
+
+### Decision Still Needed
+
+The user was asked whether runtime agent swarm coordination matters. Options:
+1. **Yes — pivot** toward executable swarm coordination via fetch/runInTerminal
+2. **Interesting but premature** — park for later
+3. **No** — agents should work independently
+4. **Explore more** — build a prototype first
 
 ## Recommendation
 
