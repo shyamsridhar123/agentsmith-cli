@@ -98,9 +98,14 @@ function buildCommitMessage(analysis: AnalysisResult): string {
   return `agentsmith: assimilate ${repo} (${skills} skills, ${agents} agents)`;
 }
 
+function escapeMarkdown(str: string): string {
+  return str.replace(/[\\`*_{}[\]()#+.!|>~]/g, "\\$&");
+}
+
 function buildRunSummary(analysis: AnalysisResult, commitHash?: string): string {
+  const repoName = escapeMarkdown(analysis.repoName);
   const lines = [
-    `## AgentSmith Run: ${analysis.repoName}`,
+    `## AgentSmith Run: ${repoName}`,
     `**Timestamp:** ${new Date().toISOString()}`,
     `**Skills:** ${analysis.skills.length}`,
     `**Agents:** ${analysis.agents.length}`,
@@ -108,16 +113,16 @@ function buildRunSummary(analysis: AnalysisResult, commitHash?: string): string 
   ];
 
   if (analysis.repo) {
-    lines.push(`**Language:** ${analysis.repo.language}`);
-    if (analysis.repo.framework) lines.push(`**Framework:** ${analysis.repo.framework}`);
-    if (analysis.repo.license) lines.push(`**License:** ${analysis.repo.license}`);
+    lines.push(`**Language:** ${escapeMarkdown(analysis.repo.language)}`);
+    if (analysis.repo.framework) lines.push(`**Framework:** ${escapeMarkdown(analysis.repo.framework)}`);
+    if (analysis.repo.license) lines.push(`**License:** ${escapeMarkdown(analysis.repo.license)}`);
   }
 
   if (commitHash) {
     lines.push(`**Commit:** \`${commitHash}\``);
   }
 
-  lines.push("", `**Summary:** ${analysis.summary}`);
+  lines.push("", `**Summary:** ${escapeMarkdown(analysis.summary)}`);
 
   return lines.join("\n");
 }

@@ -5,6 +5,7 @@
 
 import chalk from "chalk";
 import fs from "fs/promises";
+import path from "node:path";
 import { Scanner } from "../scanner/index.js";
 import { Analyzer, RemoteAnalyzer } from "../analyzer/index.js";
 import { Generator } from "../generator/index.js";
@@ -28,6 +29,13 @@ export async function assimilateCommand(
   target: string,
   options: AssimilateOptions
 ): Promise<void> {
+  // Validate --record requires --hub
+  if (options.record && !options.hub) {
+    console.error(chalk.red("Error: --record requires --hub <url> to be set."));
+    process.exitCode = 1;
+    return;
+  }
+
   const isRemote = isGitHubUrl(target);
 
   if (isRemote) {
@@ -253,7 +261,7 @@ async function recordToHub(
     const fileContents = new Map<string, string>();
     for (const filePath of generatedFilePaths) {
       try {
-        const fullPath = `${outputPath}/${filePath}`;
+        const fullPath = path.join(outputPath, filePath);
         const content = await fs.readFile(fullPath, "utf-8");
         fileContents.set(filePath, content);
       } catch {

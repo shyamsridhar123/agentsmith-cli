@@ -108,6 +108,7 @@ export class HubClient {
           lastError.name === "AbortError" ||
           (lastError instanceof HubClientError && lastError.status && lastError.status < 500)
         ) {
+          // 4xx and abort errors are not retryable — throw immediately
           throw lastError;
         }
         if (attempt < MAX_RETRIES - 1) {

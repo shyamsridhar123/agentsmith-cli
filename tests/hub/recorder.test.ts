@@ -158,4 +158,20 @@ describe("postRunSummary", () => {
     expect(content).toContain("Express");
     expect(content).toContain("MIT");
   });
+
+  it("escapes markdown special characters in summary", async () => {
+    const client = makeMockClient();
+    const analysis = makeAnalysis({
+      repoName: "repo*with_special`chars",
+      summary: "Has [links](url) and *bold*",
+    });
+
+    await postRunSummary(analysis, "results", client, "hash");
+
+    const content = client.post.mock.calls[0][1] as string;
+    // Dangerous markdown chars should be escaped
+    expect(content).toContain("\\*");
+    expect(content).toContain("\\`");
+    expect(content).toContain("\\_");
+  });
 });

@@ -56,8 +56,13 @@ async function hubRegister(
   agentId?: string,
   _options?: { verbose?: boolean },
 ): Promise<void> {
-  if (!serverUrl || !agentId) {
+  if (!serverUrl?.trim() || !agentId?.trim()) {
     console.log(chalk.red("Usage: agentsmith hub register <server-url> <agent-id>"));
+    return;
+  }
+
+  if (!/^https?:\/\//.test(serverUrl)) {
+    console.log(chalk.red("Invalid server URL: must start with http:// or https://"));
     return;
   }
 
@@ -94,7 +99,7 @@ async function hubDiff(
   hashB?: string,
   _options?: { verbose?: boolean },
 ): Promise<void> {
-  if (!hashA || !hashB) {
+  if (!hashA?.trim() || !hashB?.trim()) {
     console.log(chalk.red("Usage: agentsmith hub diff <hash-a> <hash-b>"));
     return;
   }
