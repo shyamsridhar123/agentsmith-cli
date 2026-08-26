@@ -12,6 +12,14 @@ import { assimilateCommand } from "./commands/assimilate.js";
 import { searchCommand } from "./commands/search.js";
 import { validateCommand } from "./commands/validate.js";
 import { hubCommand } from "./commands/hub.js";
+import { clearCacheCommand } from "./commands/cache.js";
+import { refineCommand } from "./commands/refine.js";
+import { refreshCommand } from "./commands/refresh.js";
+import { installPackCommand, updatePacksCommand } from "./commands/packs.js";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 
 const program = new Command();
 
@@ -26,7 +34,7 @@ ${chalk.green("╚════════════════════�
 program
   .name("agentsmith")
   .description("Assimilate any repository into a fully autonomous GitHub Copilot agent")
-  .version("0.3.0")
+  .version(version)
   .addHelpText("beforeAll", banner)
   .addHelpText("after", `
 ${chalk.bold("Examples:")}
@@ -37,7 +45,7 @@ ${chalk.bold("Examples:")}
   $ agentsmith validate                                        # Validate generated assets
 
 ${chalk.bold("Requirements:")}
-  • Node.js 18+
+  • Node.js 20.19+ or 22.12+
   • GitHub Copilot subscription (for SDK access)
   • Copilot CLI installed and in PATH
 
@@ -54,6 +62,7 @@ program
   .option("-o, --output <path>", "Output directory for generated assets")
   .option("--no-instructions", "Skip generation of .github/copilot-instructions.md")
   .option("--single-agent", "Generate a single agent.md instead of multi-agent constellation (v0.3 compat)")
+  .option("--no-cache", "Disable the analysis cache")
   .option("--hub <url>", "AgentHub server URL for coordination-aware generation")
   .option("--record", "Record this run to AgentHub (requires --hub)")
   .addHelpText("after", `
@@ -155,5 +164,43 @@ hub
   .description("List coordination channels")
   .option("-v, --verbose", "Show extra details")
   .action((opts: { verbose?: boolean }) => hubCommand("channels", [], opts));
+
+program
+  .command("refine")
+  .description("Analyze gaps between a CLI repository and its generated agent knowledge")
+  .argument("[path]", "Path to repository", ".")
+  .option("--json", "Print a machine-readable refinement report")
+  .option("--write-report", "Write .github/copilot/refinement.json")
+  .option("--apply", "Regenerate assets after gap analysis")
+  .action(refineCommand);
+
+program
+  .command("refresh")
+  .description("Re-analyze a repository without cache and refresh generated assets")
+  .argument("[path]", "Path to repository", ".")
+  .option("-v, --verbose", "Show detailed analysis output")
+  .option("-o, --output <path>", "Output directory for generated assets")
+  .action(refreshCommand);
+
+program
+  .command("cache")
+  .description("Manage cached repository analysis")
+  .command("clear")
+  .description("Remove all cached analysis")
+  .action(clearCacheCommand);
+
+program
+  .command("install")
+  .description("Install a validated skill pack from a directory or GitHub repository")
+  .argument("<source>", "Local skill-pack directory or GitHub repository URL")
+  .option("-t, --target <path>", "Repository receiving the skills", ".")
+  .action(installPackCommand);
+
+program
+  .command("update")
+  .description("Update installed skill packs from their recorded sources")
+  .argument("[name]", "Optional installed pack name")
+  .option("-t, --target <path>", "Repository containing installed skills", ".")
+  .action(updatePacksCommand);
 
 program.parse();

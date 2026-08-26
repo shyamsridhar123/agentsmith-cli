@@ -13,7 +13,9 @@ import { Registry } from "../registry/index.js";
 import { HookRunner } from "../hooks/index.js";
 import { isGitHubUrl, getRepoName } from "../utils/git.js";
 import { isPermissiveLicense } from "../utils/license.js";
-import type { AnalysisResult } from "../analyzer/types.js";
+import type { AnalysisResult } from "../analyzer/index.js";
+import { FileCache, stableCacheKey } from "../cache/index.js";
+import { loadConfig } from "../config/index.js";
 
 interface AssimilateOptions {
   dryRun?: boolean;
@@ -23,6 +25,7 @@ interface AssimilateOptions {
   singleAgent?: boolean;
   hub?: string;
   record?: boolean;
+  cache?: boolean;
 }
 
 export async function assimilateCommand(
@@ -145,6 +148,13 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
 
     const scanner = new Scanner(resolved.path, options.verbose);
     const scanResult = await scanner.scan();
+    const config = await loadConfig(resolved.path, {
+      output: options.output,
+      verbose: options.verbose,
+      instructions: options.instructions,
+      singleAgent: options.singleAgent,
+      cache: options.cache,
+    });
 
     if (options.verbose) {
       console.log(chalk.gray(`  ├── Language: ${scanResult.language}`));
@@ -155,8 +165,23 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
 
     console.log(chalk.green("\n[ANALYZE]"), "Copilot SDK analysis in progress...");
 
-    const analyzer = new Analyzer(options.verbose);
-    const analysisResult = await analyzer.analyze(scanResult);
+    const cache = new FileCache();
+    const cacheKey = stableCacheKey({
+      schema: 1,
+      root: resolved.path,
+      files: scanResult.files.map((file) => [file.relativePath, file.size]),
+      cliFramework: scanResult.cliFramework,
+    });
+    let analysisResult: AnalysisResult | undefined;
+    if (config.cache) {
+      analysisResult = await cache.get<AnalysisResult>(cacheKey, config.cacheTtlSeconds);
+      if (analysisResult && config.verbose) console.log(chalk.gray("  └── Using cached analysis"));
+    }
+    if (!analysisResult) {
+      const analyzer = new Analyzer(config.verbose);
+      analysisResult = await analyzer.analyze(scanResult);
+      if (config.cache) await cache.set(cacheKey, analysisResult);
+    }
 
     if (options.verbose) {
       for (const skill of analysisResult.skills) {
@@ -187,7 +212,7 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       console.log(chalk.green(`  ✓ ${license.name} - permissive license`));
     }
 
-    const outputPath = options.output || resolved.path;
+    const outputPath = config.output ? path.resolve(resolved.path, config.output) : resolved.path;
 
     console.log(
       chalk.green("\n[GENERATE]"),
@@ -195,8 +220,8 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
     );
 
     const generator = new Generator(
-      outputPath, options.dryRun, options.verbose,
-      options.instructions === false, options.singleAgent,
+      outputPath, options.dryRun, config.verbose,
+      config.instructions === false, config.singleAgent,
       options.hub,
     );
     const generated = await generator.generate(analysisResult);

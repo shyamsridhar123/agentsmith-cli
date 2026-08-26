@@ -17,6 +17,9 @@ export const SkillOutputSchema = z.object({
     .enum(["architecture", "reliability", "quality", "security", "patterns"])
     .default("patterns"),
   examples: z.array(z.string()).default([]),
+  antiPatterns: z.array(z.string()).optional(),
+  codebaseReferences: z.array(z.string()).optional(),
+  cliFocused: z.boolean().optional(),
 });
 
 /** Schema for a tool in LLM output — may be an object or a bare string */

@@ -10,6 +10,9 @@ export type {
   ToolDefinition,
   HookDefinition,
   AnalysisResult,
+  CLIOptionDefinition,
+  CLICommandDefinition,
+  CLIStructure,
 } from "./types.js";
 
 // Re-export core utilities
@@ -26,6 +29,12 @@ export {
   parseAnalysisResponse,
   generateDefaultSkills,
 } from "./core.js";
+export {
+  analyzeCLIStructure,
+  analyzeCLIContents,
+  generateCLISkills,
+  mergeCLISkills,
+} from "./cli.js";
 
 // Re-export Zod schemas and validation
 export {

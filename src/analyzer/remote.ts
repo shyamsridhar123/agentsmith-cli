@@ -15,6 +15,11 @@ import {
   parseAnalysisResponse,
   generateDefaultSkills,
 } from "./core.js";
+import {
+  analyzeCLIContents,
+  generateCLISkills,
+  mergeCLISkills,
+} from "./cli.js";
 
 // Files/dirs to ignore
 const IGNORE_PATTERNS = [
@@ -39,6 +44,7 @@ const CONFIG_FILES = [
   "tsconfig.json",
   "pyproject.toml",
   "setup.py",
+  "requirements.txt",
   "go.mod",
   "Cargo.toml",
   "README.md",
@@ -88,6 +94,16 @@ export class RemoteAnalyzer {
     }
 
     const fileContents = await this.github.getFiles(priorityPaths);
+    const cliMetadata = this.detectCLI(files, fileContents);
+    const cli = cliMetadata.framework
+      ? analyzeCLIContents(
+        cliMetadata.framework,
+        cliMetadata.entryFiles,
+        files.filter((file) => /(?:test|spec).*(?:cli|command)|(?:cli|command).*(?:test|spec)/i.test(file.path))
+          .map((file) => file.path),
+        fileContents,
+      )
+      : undefined;
 
     // Build prompt for Copilot SDK
     const prompt = this.buildPrompt(files, fileContents, language, framework);
@@ -101,13 +117,14 @@ export class RemoteAnalyzer {
       logLevel: this.verbose ? "debug" : "error",
     });
 
+    let sessionId: string | undefined;
     try {
       if (this.verbose) {
         console.log("  [SDK] Starting client...");
       }
       await client.start();
       if (this.verbose) {
-        console.log("  [SDK] Client started, state:", client.getState());
+        console.log("  [SDK] Client started, status:", client.getStatus());
         console.log("  [SDK] Creating session...");
       }
 
@@ -119,6 +136,7 @@ export class RemoteAnalyzer {
         },
         onPermissionRequest: approveAll,
       });
+      sessionId = session.sessionId;
 
       if (this.verbose) {
         console.log(`  [SDK] Session created: ${session.sessionId}`);
@@ -171,19 +189,22 @@ export class RemoteAnalyzer {
 
       console.log("\n");
 
-      await session.destroy();
+      await session.disconnect();
+      await client.deleteSession(session.sessionId);
+      sessionId = undefined;
       await client.stop();
 
       // Use streamed content if no complete message received
       const finalContent = responseContent || streamedContent;
 
       // Parse response
-      return this.buildResult(finalContent, repoInfo, language, framework);
+      return this.buildResult(finalContent, repoInfo, language, framework, cli);
 
     } catch (error) {
       console.error(`  [SDK] Error: ${(error as Error).message}`);
+      if (sessionId) await client.deleteSession(sessionId).catch(() => {});
       await client.stop().catch(() => {});
-      return this.generateFallback(repoInfo, language, framework, files);
+      return this.generateFallback(repoInfo, language, framework, files, cli);
     }
   }
 
@@ -237,8 +258,51 @@ export class RemoteAnalyzer {
     return undefined;
   }
 
+  private detectCLI(
+    files: GitHubFile[],
+    contents: ReadonlyMap<string, string>,
+  ): { framework?: string; entryFiles: string[] } {
+    const entryFiles = new Set<string>();
+    let framework: string | undefined;
+    const packageJson = contents.get("package.json");
+    if (packageJson) {
+      try {
+        const pkg = JSON.parse(packageJson) as {
+          dependencies?: Record<string, string>;
+          devDependencies?: Record<string, string>;
+          bin?: string | Record<string, string>;
+        };
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        framework = ["commander", "yargs", "oclif"].find((name) => name in deps);
+        if (typeof pkg.bin === "string") entryFiles.add(pkg.bin.replace(/^\.\//, ""));
+        if (pkg.bin && typeof pkg.bin === "object") {
+          Object.values(pkg.bin).forEach((entry) => entryFiles.add(entry.replace(/^\.\//, "")));
+        }
+      } catch {
+        // Invalid metadata does not prevent generic analysis.
+      }
+    }
+    const metadata = [
+      contents.get("go.mod") ?? "",
+      contents.get("pyproject.toml") ?? "",
+      contents.get("requirements.txt") ?? "",
+    ].join("\n").toLowerCase();
+    if (!framework && metadata.includes("github.com/spf13/cobra")) framework = "cobra";
+    if (!framework && /\btyper\b/.test(metadata)) framework = "typer";
+    if (!framework && /\bclick\b/.test(metadata)) framework = "click";
+    for (const file of files) {
+      if (/(^|\/)(cli|main|index)\.(ts|tsx|js|jsx|py|go)$/.test(file.path)) {
+        entryFiles.add(file.path);
+      }
+    }
+    if (!framework && files.some((file) => /(^|\/)(commands|cmd)\//.test(file.path))) {
+      framework = "convention-based";
+    }
+    return { framework, entryFiles: Array.from(entryFiles).sort() };
+  }
+
   private selectPriorityFiles(files: GitHubFile[]): string[] {
-    const maxFiles = 15;
+    const maxFiles = 30;
     const maxSize = 50000; // 50KB max per file
 
     const priority: string[] = [];
@@ -248,6 +312,15 @@ export class RemoteAnalyzer {
       const match = files.find(f => f.path === cfg || f.path.endsWith("/" + cfg));
       if (match && (match.size || 0) < maxSize) {
         priority.push(match.path);
+      }
+      for (const file of files) {
+        if (
+          priority.length < maxFiles &&
+          /(^|\/)(commands|cmd|cli)\//.test(file.path) &&
+          (file.size || 0) < maxSize
+        ) {
+          priority.push(file.path);
+        }
       }
     }
 
@@ -349,6 +422,7 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
     repo: { owner: string; repo: string; license?: string },
     language: string,
     framework: string | undefined,
+    cli?: AnalysisResult["cli"],
   ): AnalysisResult {
     const parsed = parseAnalysisResponse(response, () => null);
 
@@ -356,11 +430,12 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
       // Will not happen in the fallback path, but this handles parse failure
       return {
         repoName: repo.repo,
-        skills: [],
+        skills: cli ? generateCLISkills(cli) : [],
         agents: [],
         tools: [],
         hooks: generateDefaultHooks(language, false),
         summary: "",
+        cli,
         repo: { ...repo, language, framework },
       };
     }
@@ -369,11 +444,15 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
 
     return {
       repoName: repo.repo,
-      skills: parsed.skills as SkillDefinition[],
+      skills: mergeCLISkills(
+        parsed.skills as SkillDefinition[],
+        cli ? generateCLISkills(cli) : [],
+      ),
       agents: flatAgents,
       tools: extractAllTools(flatAgents),
       hooks: generateDefaultHooks(language, false),
       summary: parsed.summary,
+      cli,
       repo: { ...repo, language, framework },
     };
   }
@@ -383,6 +462,7 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
     language: string,
     framework: string | undefined,
     files: GitHubFile[],
+    cli?: AnalysisResult["cli"],
   ): AnalysisResult {
     // Detect source directories
     const srcDirs = new Set<string>();
@@ -393,7 +473,10 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
       }
     }
 
-    const skills: SkillDefinition[] = generateDefaultSkills(Array.from(srcDirs));
+    const skills: SkillDefinition[] = mergeCLISkills(
+      generateDefaultSkills(Array.from(srcDirs)),
+      cli ? generateCLISkills(cli) : [],
+    );
     const tools = getDefaultTools(language);
 
     const agents: AgentDefinition[] = [{
@@ -413,6 +496,7 @@ Look at directory structure and create sub-agents for major domains (cmd, api, i
       tools,
       hooks: generateDefaultHooks(language, false),
       summary: `A ${language} repository${framework ? ` using ${framework}` : ""}.`,
+      cli,
       repo: { ...repo, language, framework },
     };
   }

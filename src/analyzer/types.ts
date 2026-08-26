@@ -12,6 +12,32 @@ export interface SkillDefinition {
   triggers: string[];
   category: string;
   examples: string[];
+  antiPatterns?: string[];
+  codebaseReferences?: string[];
+  cliFocused?: boolean;
+}
+
+export interface CLIOptionDefinition {
+  name: string;
+  short?: string;
+  description?: string;
+  required: boolean;
+}
+
+export interface CLICommandDefinition {
+  name: string;
+  description?: string;
+  file: string;
+  parent?: string;
+  options: CLIOptionDefinition[];
+}
+
+export interface CLIStructure {
+  framework: string;
+  entryFiles: string[];
+  commands: CLICommandDefinition[];
+  extensionPoints: string[];
+  testFiles: string[];
 }
 
 export interface AgentDefinition {
@@ -47,6 +73,7 @@ export interface AnalysisResult {
   tools: ToolDefinition[];
   hooks: HookDefinition[];
   summary: string;
+  cli?: CLIStructure;
   repo?: {
     owner: string;
     repo: string;

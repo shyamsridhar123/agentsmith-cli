@@ -15,6 +15,8 @@ export interface ScanResult {
   configFiles: string[];
   testFiles: string[];
   sourceDirectories: string[];
+  cliFramework: string | null;
+  cliEntryFiles: string[];
 }
 
 export interface FileInfo {
@@ -121,6 +123,7 @@ export class Scanner {
 
     // Find source directories
     const sourceDirectories = this.detectSourceDirectories(files);
+    const cli = await this.detectCLI(files);
 
     return {
       rootPath: this.rootPath,
@@ -130,7 +133,79 @@ export class Scanner {
       configFiles,
       testFiles,
       sourceDirectories,
+      cliFramework: cli.framework,
+      cliEntryFiles: cli.entryFiles,
     };
+  }
+
+  private async detectCLI(files: FileInfo[]): Promise<{ framework: string | null; entryFiles: string[] }> {
+    const normalizedPaths = files.map((file) => file.relativePath.replace(/\\/g, "/"));
+    const entryFiles = new Set<string>();
+    let framework: string | null = null;
+
+    const readConfig = async (fileName: string): Promise<string> => {
+      const match = files.find((file) => file.relativePath.replace(/\\/g, "/") === fileName);
+      if (!match) return "";
+      try {
+        return await fs.readFile(match.path, "utf-8");
+      } catch {
+        return "";
+      }
+    };
+
+    const packageJson = await readConfig("package.json");
+    if (packageJson) {
+      try {
+        const pkg = JSON.parse(packageJson) as {
+          dependencies?: Record<string, string>;
+          devDependencies?: Record<string, string>;
+          bin?: string | Record<string, string>;
+        };
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        framework = ["commander", "yargs", "oclif"]
+          .find((candidate) => candidate in deps) ?? null;
+        if (typeof pkg.bin === "string") entryFiles.add(pkg.bin.replace(/^\.\//, ""));
+        if (pkg.bin && typeof pkg.bin === "object") {
+          Object.values(pkg.bin).forEach((entry) => entryFiles.add(entry.replace(/^\.\//, "")));
+        }
+      } catch {
+        // Invalid package metadata is handled by the analyzer fallback.
+      }
+    }
+
+    const goMod = await readConfig("go.mod");
+    if (!framework && goMod.includes("github.com/spf13/cobra")) framework = "cobra";
+
+    const pythonMetadata = [
+      await readConfig("pyproject.toml"),
+      await readConfig("requirements.txt"),
+      await readConfig("setup.py"),
+    ].join("\n").toLowerCase();
+    if (!framework) {
+      if (/\btyper\b/.test(pythonMetadata)) framework = "typer";
+      else if (/\bclick\b/.test(pythonMetadata)) framework = "click";
+      else if (normalizedPaths.some((file) => file.endsWith(".py"))) {
+        const pythonEntries = normalizedPaths.filter((file) =>
+          file.endsWith("/__main__.py") || file === "__main__.py" || file.endsWith("/cli.py"),
+        );
+        if (pythonEntries.length > 0) framework = "argparse";
+      }
+    }
+
+    for (const file of normalizedPaths) {
+      if (
+        /(^|\/)(cli|main|index)\.(ts|tsx|js|jsx|py|go)$/.test(file) ||
+        /(^|\/)cmd\/[^/]+\/main\.go$/.test(file)
+      ) {
+        entryFiles.add(file);
+      }
+    }
+
+    if (!framework && normalizedPaths.some((file) => /(^|\/)(commands|cmd)\//.test(file))) {
+      framework = "convention-based";
+    }
+
+    return { framework, entryFiles: Array.from(entryFiles).sort() };
   }
 
   private detectLanguage(files: FileInfo[]): string {
