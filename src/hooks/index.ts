@@ -19,20 +19,35 @@ export function parseHookCommand(command: string): { executable: string; args: s
   if (/[;&|`$><\n\r]/.test(command)) {
     throw new Error("Shell operators are not supported in hook commands");
   }
-  const tokens = command.match(/(?:[^\s"'\\]+|\\.|"(?:\\.|[^"])*"|'[^']*')+/g) ?? [];
-  if (tokens.length === 0) throw new Error("Hook command is empty");
-  const unquote = (token: string) => {
-    if (
-      (token.startsWith('"') && token.endsWith('"')) ||
-      (token.startsWith("'") && token.endsWith("'"))
-    ) {
-      return token.slice(1, -1);
+  const tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      token += character;
+      escaped = false;
+    } else if (character === "\\" && quote !== "'") {
+      escaped = true;
+    } else if (quote) {
+      if (character === quote) quote = undefined;
+      else token += character;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (token) {
+        tokens.push(token);
+        token = "";
+      }
+    } else {
+      token += character;
     }
-    return token.replace(/\\(.)/g, "$1");
-  };
+  }
+  if (quote || escaped) throw new Error("Hook command contains an unterminated quote or escape");
+  if (token) tokens.push(token);
   const executable = tokens[0];
   if (!executable) throw new Error("Hook command is empty");
-  return { executable: unquote(executable), args: tokens.slice(1).map(unquote) };
+  return { executable, args: tokens.slice(1) };
 }
 
 export type HookEvent = "pre-commit" | "post-commit" | "pre-push" | "pre-analyze" | "post-generate";
