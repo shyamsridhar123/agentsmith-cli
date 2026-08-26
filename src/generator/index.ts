@@ -16,6 +16,11 @@ import {
 } from "./instructions-writer.js";
 import { buildRootAgentMd, buildSubAgentMd } from "./agent-writer.js";
 import { buildHandoffGraph, serializeHandoffGraph } from "./handoff-writer.js";
+import {
+  buildCoordinationSection,
+  buildSubAgentCoordination,
+  extendHandoffGraph,
+} from "./hub-writer.js";
 
 export interface GeneratorResult {
   files: string[];
@@ -27,6 +32,7 @@ export class Generator {
   private verbose: boolean;
   private noInstructions: boolean;
   private singleAgent: boolean;
+  private hubUrl?: string;
 
   constructor(
     rootPath: string,
@@ -34,16 +40,23 @@ export class Generator {
     verbose = false,
     noInstructions = false,
     singleAgent = false,
+    hubUrl?: string,
   ) {
     this.rootPath = rootPath;
     this.dryRun = dryRun;
     this.verbose = verbose;
     this.noInstructions = noInstructions;
     this.singleAgent = singleAgent;
+    this.hubUrl = hubUrl;
   }
 
   async generate(analysis: AnalysisResult): Promise<GeneratorResult> {
     const files: string[] = [];
+    for (const skill of analysis.skills) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(skill.name)) {
+        throw new Error(`Unsafe skill name: ${skill.name}`);
+      }
+    }
 
     // Create .github/skills/, .github/agents/, and .github/hooks/ directories
     const skillsDir = path.join(this.rootPath, ".github", "skills");
@@ -83,7 +96,10 @@ export class Generator {
         }
 
         // Generate handoffs.json delegation graph
-        const handoffPath = await this.generateHandoffs(analysis.agents);
+        const handoffPath = await this.generateHandoffs(
+          analysis.agents,
+          analysis.repoName,
+        );
         files.push(handoffPath);
       }
     }
@@ -131,10 +147,16 @@ export class Generator {
         `${this.sanitizeAgentName(analysis.repoName)}-root`,
         helpers,
       );
+      if (this.hubUrl) {
+        content += "\n" + buildCoordinationSection(analysis.repoName, this.hubUrl);
+      }
     } else {
       // Domain sub-agent
       fileName = `${this.sanitizeAgentName(agent.name)}.agent.md`;
       content = buildSubAgentMd(agent, analysis.skills, helpers);
+      if (this.hubUrl) {
+        content += "\n" + buildSubAgentCoordination(agent.name, analysis.repoName, this.hubUrl);
+      }
     }
 
     const mdFile = path.join(agentsDir, fileName);
@@ -150,13 +172,19 @@ export class Generator {
   /**
    * Generate .github/copilot/handoffs.json with the delegation graph.
    */
-  private async generateHandoffs(agents: AgentDefinition[]): Promise<string> {
+  private async generateHandoffs(
+    agents: AgentDefinition[],
+    repoName: string,
+  ): Promise<string> {
     const copilotDir = path.join(this.rootPath, ".github", "copilot");
     const handoffFile = path.join(copilotDir, "handoffs.json");
     const relativePath = ".github/copilot/handoffs.json";
 
     const graph = buildHandoffGraph(agents);
-    const content = serializeHandoffGraph(graph);
+    const finalGraph = this.hubUrl
+      ? extendHandoffGraph(graph, this.hubUrl, repoName)
+      : graph;
+    const content = serializeHandoffGraph(finalGraph);
 
     if (!this.dryRun) {
       await fs.mkdir(copilotDir, { recursive: true });
@@ -335,7 +363,10 @@ ${examples}
     const mdFile = path.join(agentsDir, `${agentName}.agent.md`);
     const relativePath = `.github/agents/${agentName}.agent.md`;
 
-    const content = this.buildMainAgentMd(analysis, agentName);
+    let content = this.buildMainAgentMd(analysis, agentName);
+    if (this.hubUrl) {
+      content += "\n" + buildCoordinationSection(analysis.repoName, this.hubUrl);
+    }
 
     if (!this.dryRun) {
       await fs.writeFile(mdFile, content, "utf-8");

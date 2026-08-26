@@ -148,7 +148,7 @@ export class Registry {
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
         .map((s) => s.entry);
-    } catch (error) {
+    } catch {
       // Registry doesn't exist or is empty
       return [];
     }

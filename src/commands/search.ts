@@ -4,7 +4,6 @@
  */
 
 import chalk from "chalk";
-import path from "path";
 import { Registry } from "../registry/index.js";
 
 interface SearchOptions {

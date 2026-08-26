@@ -49,6 +49,6 @@ export function buildHandoffGraph(agents: AgentDefinition[]): HandoffGraph {
 /**
  * Serialize the handoff graph to a formatted JSON string.
  */
-export function serializeHandoffGraph(graph: HandoffGraph): string {
+export function serializeHandoffGraph<T extends HandoffGraph>(graph: T): string {
   return JSON.stringify(graph, null, 2) + "\n";
 }

@@ -8,7 +8,14 @@ import { z } from "zod";
 
 /** Schema for a single skill in LLM output */
 export const SkillOutputSchema = z.object({
-  name: z.string().min(1).max(64),
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(
+      /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+      "Skill name must be a safe file name without path separators",
+    ),
   description: z.string().min(1),
   sourceDir: z.string().default(""),
   patterns: z.array(z.string()).default([]),

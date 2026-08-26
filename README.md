@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/agentsmith.svg?style=flat-square)](https://www.npmjs.com/package/agentsmith)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-178%20passing-brightgreen?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-240%20passing-brightgreen?style=flat-square)](tests/)
 [![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-SDK-blue?style=flat-square&logo=github)](https://github.com/github/copilot-sdk)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-20.19%2B%20%7C%2022.12%2B-green?style=flat-square&logo=node.js)](https://nodejs.org/)
@@ -44,7 +44,8 @@ GitHub Copilot's [custom agents](https://code.visualstudio.com/docs/copilot/cust
 | **CLI-Native Analysis** | Detects Commander, Yargs, oclif, Cobra, Click, Typer, and argparse conventions; extracts commands and options into focused skills. |
 | **Refinement & Freshness** | Finds missing CLI knowledge, refreshes analysis, caches repeat runs, and records generated-skill fingerprints. |
 | **Skill Packs** | Installs and updates validated local or GitHub-hosted skill packs with lockfile tracking. |
-| **178 Tests** | 9 test suites covering CLI analysis, platform parity, analyzer core, scanner, generator, GitHub client, registry, git utils, and license detection. |
+| **AgentHub Coordination** | Optionally creates repository-scoped coordination channels, adds AgentHub instructions to generated agents, and records complete generation runs as diffable git bundles. |
+| **240 Tests** | 14 test suites covering CLI analysis, platform parity, analyzer core, scanner, generator, AgentHub, GitHub client, registry, git utils, and license detection. |
 
 ## Quick Start
 
@@ -74,6 +75,11 @@ npx agentsmith refresh .
 # Install or update a skill pack
 npx agentsmith install ./my-skill-pack
 npx agentsmith update
+
+# Register with AgentHub, generate coordinated agents, and record the run
+npx agentsmith hub register http://localhost:8080 smith
+npx agentsmith assimilate . --hub http://localhost:8080 --record
+npx agentsmith hub log
 ```
 
 ## What Gets Generated
@@ -140,7 +146,11 @@ Options:
   -n, --dry-run           Preview changes without writing files
   -v, --verbose           Show detailed analysis output
   -o, --output <dir>      Output directory for generated assets
+  --no-cache              Disable the analysis cache
+  --no-instructions       Skip copilot-instructions.md generation
   --single-agent          Generate a single agent (v0.3 mode)
+  --hub <url>             Add AgentHub coordination to generated agents
+  --record                Record generated assets to AgentHub (requires --hub)
 ```
 
 ### `search <query>`
@@ -179,6 +189,25 @@ Bypass the analysis cache and regenerate agent assets and `.github/copilot/fresh
 ### `install <source>` / `update [name]`
 
 Install validated skill packs from a local directory or GitHub repository and update them from their locked sources.
+
+### `hub`
+
+Manage the optional AgentHub coordination backend.
+
+```bash
+agentsmith hub register <server-url> <agent-id> [--force]
+agentsmith hub status
+agentsmith hub channels
+agentsmith hub log
+agentsmith hub diff <hash-a> <hash-b>
+```
+
+Registration stores AgentHub-compatible credentials in `~/.agenthub/config.json`.
+It refuses to replace credentials for a different hub unless `--force` is used.
+Using `assimilate --hub <url>` verifies that the configured credentials belong
+to that server and creates the repository's exploration, results, and review
+channels. Add `--record` to push the generated assets and
+`skills-registry.jsonl` as a diffable git bundle.
 
 ## Example
 
@@ -224,7 +253,11 @@ src/
 │   ├── index.ts           # Main generator (skills, hooks, registry)
 │   ├── agent-writer.ts    # Multi-agent .agent.md generation
 │   ├── handoff-writer.ts  # handoffs.json delegation graph
+│   ├── hub-writer.ts      # AgentHub coordination instructions
 │   └── instructions-writer.ts  # copilot-instructions.md generation
+├── hub/
+│   ├── client.ts           # AgentHub REST client + credential safety
+│   └── recorder.ts         # Git bundle recording + channel setup
 ├── github/
 │   └── index.ts           # Async GitHub API client with retry + typed errors
 ├── scanner/
@@ -235,6 +268,7 @@ src/
 │   └── index.ts           # Hook loading and execution
 ├── commands/
 │   ├── assimilate.ts      # Main CLI command
+│   ├── hub.ts             # AgentHub management commands
 │   ├── search.ts          # Registry search command
 │   └── validate.ts        # Asset validation command
 └── utils/
@@ -242,7 +276,7 @@ src/
     └── license.ts         # License detection across file types
 ```
 
-**178 tests passing** across CLI analysis, generation, registry, platform, and security-sensitive workflows.
+**240 tests passing** across CLI analysis, generation, AgentHub integration, registry, platform, and security-sensitive workflows.
 
 ## How It Works
 
@@ -306,7 +340,7 @@ git clone https://github.com/shyamsridhar123/agentsmith-cli.git
 cd agentsmith-cli
 npm install
 npm run dev      # Watch mode
-npm test         # 178 tests
+npm test         # 240 tests
 npm run build    # Production build
 ```
 
@@ -320,6 +354,7 @@ If this project helps you build smarter AI agents, consider giving it a star.
 
 - [GitHub Copilot SDK](https://github.com/github/copilot-sdk) — The cognitive engine powering Agent Smith
 - [VS Code Custom Agents](https://code.visualstudio.com/docs/copilot/customization/custom-agents) — The specification for generated agents
+- [AgentHub](https://github.com/ottogin/agenthub) — Optional git-backed coordination and provenance backend
 - [Zod](https://github.com/colinhacks/zod) — Schema validation for LLM output
 
 ---

@@ -129,7 +129,7 @@ export class HookRunner {
           hooks.push(hookDef);
         }
       }
-    } catch (error) {
+    } catch {
       // No hooks directory or can't read - that's fine
       if (this.verbose) {
         console.log(chalk.gray(`  No hooks directory found at ${hooksDir}`));

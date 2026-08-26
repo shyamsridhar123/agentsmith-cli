@@ -18,7 +18,7 @@
     "dev": "tsup --watch",
     "start": "tsx src/main.ts",
     "prepublishOnly": "npm run build",
-    "lint": "eslint src/",
+    "lint": "eslint --config config/eslint.config.js src/",
     "test": "vitest",
     "typecheck": "tsc --noEmit"
   },
@@ -62,10 +62,13 @@
     "zod": "^3.22.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/node": "^20.19.43",
+    "eslint": "^9.39.5",
     "tsup": "^8.0.0",
     "tsx": "^4.23.12",
     "typescript": "^5.3.0",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^4.1.11"
   },
   "engines": {

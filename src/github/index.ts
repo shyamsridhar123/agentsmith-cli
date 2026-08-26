@@ -210,11 +210,20 @@ export class GitHubClient {
    */
   async getTree(branch?: string): Promise<GitHubFile[]> {
     const ref = branch || (await this.getRepoInfo()).defaultBranch;
-    const data = JSON.parse(await this.api(`/git/trees/${ref}?recursive=1`));
+    const data = JSON.parse(
+      await this.api(`/git/trees/${ref}?recursive=1`),
+    ) as {
+      tree: Array<{
+        path: string;
+        type: "blob" | "tree";
+        size?: number;
+        sha: string;
+      }>;
+    };
 
     return data.tree
-      .filter((item: any) => item.type === "blob" || item.type === "tree")
-      .map((item: any) => ({
+      .filter((item) => item.type === "blob" || item.type === "tree")
+      .map((item) => ({
         path: item.path,
         type: item.type === "blob" ? "file" : "dir",
         size: item.size,

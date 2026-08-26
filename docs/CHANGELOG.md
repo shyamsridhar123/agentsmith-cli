@@ -2,6 +2,23 @@
 
 All notable changes to Agent Smith are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Optional AgentHub coordination for generated agents, including repository-scoped channels, run provenance, history, and diff commands.
+- ESLint flat configuration and a reproducible lint toolchain.
+
+### Fixed
+
+- Matched AgentHub's binary git-bundle upload/download and plain-text diff API contracts.
+- Prevented API keys from being reused with another server or overwritten without `--force`.
+- Secured AgentHub config files with atomic writes, restrictive permissions, and Windows ACLs.
+- Isolated provenance commits from user git hooks, signing, templates, and global configuration.
+- Prevented generated skill and recording paths from escaping their intended directories.
+- Kept optional AgentHub failures from blocking normal repository generation.
+- Avoided coordination-channel collisions while respecting AgentHub's 31-character limit.
+
 ## [0.4.0] — 2026-03-15
 
 ### Added

@@ -11,6 +11,7 @@ import chalk from "chalk";
 import { assimilateCommand } from "./commands/assimilate.js";
 import { searchCommand } from "./commands/search.js";
 import { validateCommand } from "./commands/validate.js";
+import { hubCommand } from "./commands/hub.js";
 import { clearCacheCommand } from "./commands/cache.js";
 import { refineCommand } from "./commands/refine.js";
 import { refreshCommand } from "./commands/refresh.js";
@@ -62,6 +63,8 @@ program
   .option("--no-instructions", "Skip generation of .github/copilot-instructions.md")
   .option("--single-agent", "Generate a single agent.md instead of multi-agent constellation (v0.3 compat)")
   .option("--no-cache", "Disable the analysis cache")
+  .option("--hub <url>", "AgentHub server URL for coordination-aware generation")
+  .option("--record", "Record this run to AgentHub (requires --hub)")
   .addHelpText("after", `
 ${chalk.bold("Examples:")}
   $ agentsmith assimilate .                                      # Local repository (multi-agent)
@@ -113,6 +116,55 @@ ${chalk.bold("Examples:")}
   $ agentsmith validate --verbose            # Detailed output
 `)
   .action(validateCommand);
+
+const hub = program
+  .command("hub")
+  .description("Manage AgentHub coordination backend")
+  .addHelpText("after", `
+${chalk.bold("Subcommands:")}
+  status                          Check AgentHub connection
+  register <server-url> <agent>   Register this agent with a hub
+  diff <hash-a> <hash-b>          Compare two run snapshots
+  log                             Show recent recorded runs
+  channels                        List coordination channels
+`);
+
+hub
+  .command("status")
+  .description("Check AgentHub connection status")
+  .option("-v, --verbose", "Show extra details")
+  .action((opts: { verbose?: boolean }) => hubCommand("status", [], opts));
+
+hub
+  .command("register")
+  .description("Register this agent with an AgentHub server")
+  .argument("<server-url>", "AgentHub server URL")
+  .argument("<agent-id>", "Agent identifier to register")
+  .option("--force", "Replace credentials for a different configured hub")
+  .option("-v, --verbose", "Show extra details")
+  .action((url: string, id: string, opts: { verbose?: boolean; force?: boolean }) =>
+    hubCommand("register", [url, id], opts));
+
+hub
+  .command("diff")
+  .description("Compare two run snapshots from AgentHub")
+  .argument("<hash-a>", "First commit hash")
+  .argument("<hash-b>", "Second commit hash")
+  .option("-v, --verbose", "Show extra details")
+  .action((a: string, b: string, opts: { verbose?: boolean }) =>
+    hubCommand("diff", [a, b], opts));
+
+hub
+  .command("log")
+  .description("Show recent recorded runs")
+  .option("-v, --verbose", "Show extra details")
+  .action((opts: { verbose?: boolean }) => hubCommand("log", [], opts));
+
+hub
+  .command("channels")
+  .description("List coordination channels")
+  .option("-v, --verbose", "Show extra details")
+  .action((opts: { verbose?: boolean }) => hubCommand("channels", [], opts));
 
 program
   .command("refine")
