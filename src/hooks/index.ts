@@ -6,10 +6,49 @@
 
 import fs from "fs/promises";
 import path from "path";
-import { execSync } from "child_process";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import yaml from "yaml";
 import chalk from "chalk";
 import type { HookDefinition } from "../analyzer/index.js";
+import { HookOutputSchema } from "../analyzer/index.js";
+
+const execFileAsync = promisify(execFile);
+
+export function parseHookCommand(command: string): { executable: string; args: string[] } {
+  if (/[;&|`$><\n\r]/.test(command)) {
+    throw new Error("Shell operators are not supported in hook commands");
+  }
+  const tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      token += character;
+      escaped = false;
+    } else if (character === "\\" && quote !== "'") {
+      escaped = true;
+    } else if (quote) {
+      if (character === quote) quote = undefined;
+      else token += character;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (token) {
+        tokens.push(token);
+        token = "";
+      }
+    } else {
+      token += character;
+    }
+  }
+  if (quote || escaped) throw new Error("Hook command contains an unterminated quote or escape");
+  if (token) tokens.push(token);
+  const executable = tokens[0];
+  if (!executable) throw new Error("Hook command is empty");
+  return { executable, args: tokens.slice(1) };
+}
 
 export type HookEvent = "pre-commit" | "post-commit" | "pre-push" | "pre-analyze" | "post-generate";
 
@@ -79,7 +118,12 @@ export class HookRunner {
 
         const hookPath = path.join(hooksDir, file);
         const content = await fs.readFile(hookPath, "utf-8");
-        const hookDef = yaml.parse(content) as HookDefinition;
+        const parsed = HookOutputSchema.safeParse(yaml.parse(content));
+        if (!parsed.success) {
+          if (this.verbose) console.log(chalk.yellow(`  Skipping invalid hook: ${file}`));
+          continue;
+        }
+        const hookDef = parsed.data as HookDefinition;
 
         if (hookDef.event === event) {
           hooks.push(hookDef);
@@ -119,14 +163,15 @@ export class HookRunner {
           console.log(chalk.gray(`    Running: ${command}`));
         }
 
-        const output = execSync(command, {
+        const { executable, args } = parseHookCommand(command);
+        const { stdout, stderr } = await execFileAsync(executable, args, {
           cwd: this.rootPath,
           encoding: "utf-8",
-          stdio: this.verbose ? "pipe" : "pipe",
-          timeout: 120000, // 2 minute timeout per command
+          timeout: 120000,
+          maxBuffer: 10 * 1024 * 1024,
         });
 
-        outputs.push(output.trim());
+        outputs.push(`${stdout}${stderr}`.trim());
       } catch (error) {
         const err = error as { message?: string; stderr?: string };
         return {
@@ -150,7 +195,9 @@ export class HookRunner {
   private async evaluateCondition(condition: string): Promise<boolean> {
     // Support simple conditions like "file:package.json" or "command:npm --version"
     if (condition.startsWith("file:")) {
-      const filePath = path.join(this.rootPath, condition.slice(5));
+      const filePath = path.resolve(this.rootPath, condition.slice(5));
+      const relative = path.relative(this.rootPath, filePath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) return false;
       try {
         await fs.access(filePath);
         return true;
@@ -161,7 +208,12 @@ export class HookRunner {
 
     if (condition.startsWith("command:")) {
       try {
-        execSync(condition.slice(8), { encoding: "utf-8", stdio: "pipe" });
+        const { executable, args } = parseHookCommand(condition.slice(8));
+        await execFileAsync(executable, args, {
+          cwd: this.rootPath,
+          encoding: "utf-8",
+          timeout: 30000,
+        });
         return true;
       } catch {
         return false;

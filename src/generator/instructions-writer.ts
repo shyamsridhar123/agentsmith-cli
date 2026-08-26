@@ -6,6 +6,50 @@
 
 import type { AnalysisResult, SkillDefinition, ToolDefinition } from "../analyzer/types.js";
 
+export interface DirectoryInstruction {
+  directory: string;
+  content: string;
+}
+
+export function buildDirectoryInstructions(analysis: AnalysisResult): DirectoryInstruction[] {
+  const grouped = new Map<string, SkillDefinition[]>();
+  for (const skill of analysis.skills) {
+    const directory = skill.sourceDir.replace(/\\/g, "/").replace(/^\.?\//, "").replace(/\/+$/, "");
+    if (!directory || directory === "." || directory.includes("..")) continue;
+    const list = grouped.get(directory) ?? [];
+    list.push(skill);
+    grouped.set(directory, list);
+  }
+
+  return Array.from(grouped.entries()).map(([directory, skills]) => {
+    const patterns = Array.from(new Set(skills.flatMap((skill) => skill.patterns)));
+    const antiPatterns = Array.from(new Set(skills.flatMap((skill) => skill.antiPatterns ?? [])));
+    const references = Array.from(new Set(skills.flatMap((skill) => skill.codebaseReferences ?? [])));
+    const sections = [
+      "<!-- agentsmith:managed -->",
+      `# Copilot Instructions for \`${directory}/\``,
+      "",
+      "## Conventions",
+      "",
+      ...(patterns.length > 0 ? patterns.map((item) => `- ${item}`) : ["- Follow nearby implementation patterns."]),
+    ];
+    if (antiPatterns.length > 0) {
+      sections.push("", "## Anti-Patterns", "", ...antiPatterns.map((item) => `- ${item}`));
+    }
+    if (references.length > 0) {
+      sections.push(
+        "",
+        "## Codebase References",
+        "",
+        "Use `#codebase` to inspect:",
+        ...references.map((item) => `- \`${item}\``),
+      );
+    }
+    sections.push("", "<!-- /agentsmith:managed -->");
+    return { directory, content: `${sections.join("\n")}\n` };
+  });
+}
+
 const MANAGED_START = "<!-- agentsmith:managed -->";
 const MANAGED_END = "<!-- /agentsmith:managed -->";
 

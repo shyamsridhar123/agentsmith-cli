@@ -2,10 +2,10 @@
 
 [![npm version](https://img.shields.io/npm/v/agentsmith.svg?style=flat-square)](https://www.npmjs.com/package/agentsmith)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-169%20passing-brightgreen?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-178%20passing-brightgreen?style=flat-square)](tests/)
 [![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-SDK-blue?style=flat-square&logo=github)](https://github.com/github/copilot-sdk)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green?style=flat-square&logo=node.js)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20.19%2B%20%7C%2022.12%2B-green?style=flat-square&logo=node.js)](https://nodejs.org/)
 
 > *"The best thing about being me… there are so many of me."*
 >
@@ -41,7 +41,10 @@ GitHub Copilot's [custom agents](https://code.visualstudio.com/docs/copilot/cust
 | **License Enforcement** | Only assimilates repos with permissive licenses. Detects MIT, Apache, BSD, GPL, ISC, Unlicense, and more — from LICENSE files, `package.json`, or `pyproject.toml`. |
 | **Lifecycle Hooks** | Generates pre-commit, pre-push, and post-generate hooks. Runs validation automatically after generation. |
 | **Searchable Registry** | JSONL index with scoring, type filtering, and trigger-based matching. |
-| **169 Tests** | 7 test suites covering analyzer core, scanner, generator, GitHub client, registry, git utils, and license detection. |
+| **CLI-Native Analysis** | Detects Commander, Yargs, oclif, Cobra, Click, Typer, and argparse conventions; extracts commands and options into focused skills. |
+| **Refinement & Freshness** | Finds missing CLI knowledge, refreshes analysis, caches repeat runs, and records generated-skill fingerprints. |
+| **Skill Packs** | Installs and updates validated local or GitHub-hosted skill packs with lockfile tracking. |
+| **178 Tests** | 9 test suites covering CLI analysis, platform parity, analyzer core, scanner, generator, GitHub client, registry, git utils, and license detection. |
 
 ## Quick Start
 
@@ -63,6 +66,14 @@ npx agentsmith search "routing"
 
 # Validate generated assets
 npx agentsmith validate
+
+# Find and optionally repair CLI knowledge gaps
+npx agentsmith refine . --write-report
+npx agentsmith refresh .
+
+# Install or update a skill pack
+npx agentsmith install ./my-skill-pack
+npx agentsmith update
 ```
 
 ## What Gets Generated
@@ -157,6 +168,18 @@ Options:
 
 Checks: valid frontmatter, required fields, skill references, hook events, registry integrity.
 
+### `refine [path]`
+
+Analyze CLI command coverage and report missing structure, option, and testing knowledge. Use `--apply` to regenerate assets and `--json` for machine-readable output.
+
+### `refresh [path]`
+
+Bypass the analysis cache and regenerate agent assets and `.github/copilot/freshness.json`.
+
+### `install <source>` / `update [name]`
+
+Install validated skill packs from a local directory or GitHub repository and update them from their locked sources.
+
 ## Example
 
 ```
@@ -219,7 +242,7 @@ src/
     └── license.ts         # License detection across file types
 ```
 
-**4,054 lines of TypeScript.** **2,148 lines of tests.** **169 tests passing.**
+**178 tests passing** across CLI analysis, generation, registry, platform, and security-sensitive workflows.
 
 ## How It Works
 
@@ -254,7 +277,7 @@ Repository              Agent Smith                    VS Code
 
 ## Requirements
 
-- **Node.js 18+**
+- **Node.js 20.19+ or 22.12+**
 - **GitHub Copilot subscription** — Active subscription for SDK access
 - **GitHub CLI authenticated** — `gh auth login`
 
@@ -283,7 +306,7 @@ git clone https://github.com/shyamsridhar123/agentsmith-cli.git
 cd agentsmith-cli
 npm install
 npm run dev      # Watch mode
-npm test         # 169 tests
+npm test         # 178 tests
 npm run build    # Production build
 ```
 

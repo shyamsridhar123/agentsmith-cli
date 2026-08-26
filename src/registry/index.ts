@@ -6,6 +6,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { SkillDefinition, AgentDefinition } from "../analyzer/index.js";
+import { z } from "zod";
 
 export interface RegistryEntry {
   type: "skill" | "agent";
@@ -18,6 +19,32 @@ export interface RegistryEntry {
   parentAgent?: string;
   subAgents?: string[];
   isSubAgent?: boolean;
+}
+
+export const RegistryEntrySchema = z.object({
+  type: z.enum(["skill", "agent"]),
+  name: z.string().min(1),
+  file: z.string().min(1),
+  vsCodeAgent: z.string().optional(),
+  description: z.string(),
+  category: z.string().optional(),
+  triggers: z.array(z.string()).default([]),
+  parentAgent: z.string().optional(),
+  subAgents: z.array(z.string()).optional(),
+  isSubAgent: z.boolean().optional(),
+});
+
+function parseEntries(content: string): RegistryEntry[] {
+  const entries: RegistryEntry[] = [];
+  for (const line of content.trim().split("\n").filter(Boolean)) {
+    try {
+      const parsed = RegistryEntrySchema.safeParse(JSON.parse(line));
+      if (parsed.success) entries.push(parsed.data);
+    } catch {
+      // Ignore malformed registry lines rather than trusting partial data.
+    }
+  }
+  return entries;
 }
 
 export class Registry {
@@ -78,7 +105,7 @@ export class Registry {
       const content = await fs.readFile(this.registryPath, "utf-8");
       const lines = content.trim().split("\n").filter(Boolean);
 
-      let entries: RegistryEntry[] = lines.map((line) => JSON.parse(line));
+      let entries: RegistryEntry[] = parseEntries(lines.join("\n"));
       
       // Filter by type if specified
       if (typeFilter) {
@@ -130,8 +157,7 @@ export class Registry {
   async list(): Promise<RegistryEntry[]> {
     try {
       const content = await fs.readFile(this.registryPath, "utf-8");
-      const lines = content.trim().split("\n").filter(Boolean);
-      return lines.map((line) => JSON.parse(line));
+      return parseEntries(content);
     } catch {
       return [];
     }
@@ -140,5 +166,18 @@ export class Registry {
   async get(name: string): Promise<RegistryEntry | null> {
     const entries = await this.list();
     return entries.find((e) => e.name === name) || null;
+  }
+
+  async upsert(entries: RegistryEntry[]): Promise<void> {
+    const existing = await this.list();
+    const merged = new Map(existing.map((entry) => [`${entry.type}:${entry.name}`, entry]));
+    for (const entry of entries) {
+      const validated = RegistryEntrySchema.parse(entry);
+      merged.set(`${validated.type}:${validated.name}`, validated);
+    }
+    if (!this.dryRun) {
+      const content = Array.from(merged.values()).map((entry) => JSON.stringify(entry)).join("\n");
+      await fs.writeFile(this.registryPath, content ? `${content}\n` : "", "utf-8");
+    }
   }
 }
