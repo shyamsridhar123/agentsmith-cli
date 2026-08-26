@@ -61,17 +61,6 @@ const CONFIG_PATTERNS = [
   ".github/workflows/*.yml",
 ];
 
-// Test file patterns
-const TEST_PATTERNS = [
-  "**/*.test.ts",
-  "**/*.test.js",
-  "**/*.spec.ts",
-  "**/*.spec.js",
-  "**/test_*.py",
-  "**/*_test.py",
-  "**/*_test.go",
-];
-
 export class Scanner {
   private rootPath: string;
   private verbose: boolean;

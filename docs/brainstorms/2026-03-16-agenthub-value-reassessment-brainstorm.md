@@ -1,9 +1,13 @@
 # Brainstorm: AgentHub Value Reassessment
 
 **Date:** 2026-03-16
-**Status:** Open — awaiting user decision
+**Status:** Resolved — keep as an optional, hardened integration
 **Trigger:** CE Review of AgentHub integration revealed fundamental value gap
 **Prior art:** `docs/brainstorms/2026-03-15-agenthub-integration-brainstorm.md`
+
+> **Resolution (2026-08-26):** Keep the integration opt-in. The implementation now
+> uses executable agent tools, validates credentials and paths, creates coordination
+> channels, and records runs using AgentHub's real binary git-bundle API.
 
 ## What We Discovered
 
@@ -107,18 +111,17 @@ When you discover a significant pattern, use #fetch to POST it:
 
 Not capability — but **specificity**. The hub-writer needs to emit fetch-ready instructions, not vague channel references. And the coordination config needs the API key path baked in.
 
-### Decision Still Needed
+### Decision
 
-The user was asked whether runtime agent swarm coordination matters. Options:
+The original options were:
 1. **Yes — pivot** toward executable swarm coordination via fetch/runInTerminal
 2. **Interesting but premature** — park for later
 3. **No** — agents should work independently
 4. **Explore more** — build a prototype first
 
-## Recommendation
+## Final Decision
 
-**Wait for the user's answer before acting.** The code is built, tested, and on a feature branch (`feat/agenthub-integration`). It costs nothing to keep it unmerged. The decision is product-level, not engineering-level.
-
-If the user says "remove," we delete and move on (10 minutes of work).
-If the user says "pivot," we redesign around Scenario A with a concrete UX.
-If the user says "keep," we mark experimental and document the value gap.
+Keep AgentHub as an explicitly configured adapter rather than a core dependency.
+Prioritize multi-run provenance and concrete coordination instructions. If the hub
+is unavailable, AgentSmith continues its normal generation path without emitting
+broken hub coordination metadata.

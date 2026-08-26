@@ -52,6 +52,11 @@ export class Generator {
 
   async generate(analysis: AnalysisResult): Promise<GeneratorResult> {
     const files: string[] = [];
+    for (const skill of analysis.skills) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(skill.name)) {
+        throw new Error(`Unsafe skill name: ${skill.name}`);
+      }
+    }
 
     // Create .github/skills/, .github/agents/, and .github/hooks/ directories
     const skillsDir = path.join(this.rootPath, ".github", "skills");
@@ -91,7 +96,10 @@ export class Generator {
         }
 
         // Generate handoffs.json delegation graph
-        const handoffPath = await this.generateHandoffs(analysis.agents);
+        const handoffPath = await this.generateHandoffs(
+          analysis.agents,
+          analysis.repoName,
+        );
         files.push(handoffPath);
       }
     }
@@ -164,16 +172,19 @@ export class Generator {
   /**
    * Generate .github/copilot/handoffs.json with the delegation graph.
    */
-  private async generateHandoffs(agents: AgentDefinition[]): Promise<string> {
+  private async generateHandoffs(
+    agents: AgentDefinition[],
+    repoName: string,
+  ): Promise<string> {
     const copilotDir = path.join(this.rootPath, ".github", "copilot");
     const handoffFile = path.join(copilotDir, "handoffs.json");
     const relativePath = ".github/copilot/handoffs.json";
 
     const graph = buildHandoffGraph(agents);
     const finalGraph = this.hubUrl
-      ? extendHandoffGraph(graph, this.hubUrl, agents[0]?.parentAgent || "repo")
+      ? extendHandoffGraph(graph, this.hubUrl, repoName)
       : graph;
-    const content = serializeHandoffGraph(finalGraph as ReturnType<typeof buildHandoffGraph>);
+    const content = serializeHandoffGraph(finalGraph);
 
     if (!this.dryRun) {
       await fs.mkdir(copilotDir, { recursive: true });
@@ -352,7 +363,10 @@ ${examples}
     const mdFile = path.join(agentsDir, `${agentName}.agent.md`);
     const relativePath = `.github/agents/${agentName}.agent.md`;
 
-    const content = this.buildMainAgentMd(analysis, agentName);
+    let content = this.buildMainAgentMd(analysis, agentName);
+    if (this.hubUrl) {
+      content += "\n" + buildCoordinationSection(analysis.repoName, this.hubUrl);
+    }
 
     if (!this.dryRun) {
       await fs.writeFile(mdFile, content, "utf-8");

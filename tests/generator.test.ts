@@ -139,6 +139,16 @@ describe("Generator — SKILL.md generation", () => {
     const content = writeCall![1] as string;
     expect(content).toContain("See source files in the repository for examples.");
   });
+
+  it("rejects skill names that could escape the skills directory", async () => {
+    const analysis = makeAnalysis({
+      skills: [makeSkill({ name: "../../escaped" })],
+    });
+
+    await expect(new Generator("/project").generate(analysis)).rejects.toThrow(
+      "Unsafe skill name",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -229,6 +239,55 @@ describe("Generator — agent.md generation", () => {
     const content = writeCall![1] as string;
     expect(content).toContain("`npm run build`");
     expect(content).toContain("`npm test`");
+  });
+
+  it("adds coordination instructions in single-agent mode", async () => {
+    const analysis = makeAnalysis({ agents: [makeAgent()] });
+
+    const gen = new Generator(
+      "/project",
+      false,
+      false,
+      false,
+      true,
+      "http://hub:8080",
+    );
+    await gen.generate(analysis);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (call) => (call[0] as string).includes("test-repo.agent.md"),
+    );
+    expect(writeCall?.[1]).toContain("## Coordination");
+    expect(writeCall?.[1]).toContain("#test-repo-exploration");
+  });
+
+  it("uses the repository name for handoff coordination channels", async () => {
+    const analysis = makeAnalysis({
+      repoName: "my-repo",
+      agents: [
+        makeAgent({ name: "root" }),
+        makeAgent({
+          name: "backend",
+          isSubAgent: true,
+          parentAgent: "root",
+        }),
+      ],
+    });
+
+    const gen = new Generator(
+      "/project",
+      false,
+      false,
+      false,
+      false,
+      "http://hub:8080",
+    );
+    await gen.generate(analysis);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (call) => (call[0] as string).includes("handoffs.json"),
+    );
+    expect(writeCall?.[1]).toContain('"exploration": "my-repo-exploration"');
   });
 
   it("sanitizes repo name for agent filename", async () => {

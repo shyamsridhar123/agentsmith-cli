@@ -24,7 +24,7 @@ The insight: AgentSmith operates at *generation time*, not runtime. It can emit 
 
 ### Key Design Decisions
 
-1. **Hub is NEVER a core dependency** — Without `--hub`, output is 100% identical to before. All hub code lives in `src/hub/` and is lazily imported via `await import()`.
+1. **Hub is NEVER a core dependency** — Without `--hub`, output is 100% identical to before. Hub code is isolated in `src/hub/` and invoked only by the opt-in commands and flags.
 
 2. **Zero new npm dependencies** — Uses native `fetch` (Node 18+), native `child_process` for git operations.
 
@@ -53,34 +53,37 @@ src/commands/
   assimilate.ts  — Modified: --hub and --record flags + recordToHub()
 
 tests/hub/
-  client.test.ts      — 16 tests (all API methods, retry, config loading)
-  recorder.test.ts    — 7 tests (recording, summaries, escaping)
+  client.test.ts      — API protocol, retry, timeout, and config safety
+  recorder.test.ts    — recording, containment, channels, and summaries
 
 tests/generator/
-  hub-writer.test.ts  — 9 tests (channels, coordination sections, handoff extension)
+  hub-writer.test.ts  — channel naming, coordination sections, handoff extension
 ```
 
 ## Critical Bugs Found During Review
 
 | # | Bug | File | Fix |
 |---|-----|------|-----|
-| 1 | Windows path separator — template literal instead of `path.join()` | assimilate.ts:256 | Use `path.join(outputPath, filePath)` |
+| 1 | AgentHub git endpoints treated binary/text responses as JSON | client.ts | Match upstream raw bundle and plain-text diff contracts |
 | 2 | `--record` without `--hub` silently does nothing | assimilate.ts:103 | Early validation with error message |
 | 3 | Hub register/diff commands accept undefined args | hub.ts:54,92 | Add `.trim()` null checks + URL format validation |
 | 4 | Markdown injection in recorder summaries | recorder.ts:101 | `escapeMarkdown()` for all user-supplied values |
-| 5 | Retry comment unclear (4xx vs 5xx) | client.ts:109 | Clarified with inline comment |
+| 5 | Credentials could be reused against a different server | client.ts | Bind API keys to the configured server URL |
 
 ## Patterns Worth Reusing
 
-### Lazy Dynamic Import for Optional Features
+### Optional Adapter Boundary
 ```typescript
-// Hub module only loaded when --hub is provided
-if (options.hub && options.record && !options.dryRun) {
-  const { HubClient } = await import("../hub/client.js");
-  const { recordRun } = await import("../hub/recorder.js");
+const hubClient = await prepareHub(analysis.repoName, options);
+const activeHubUrl = options.dryRun
+  ? options.hub
+  : hubClient?.getServerUrl();
+
+if (hubClient && options.record) {
+  await recordToHub(hubClient, analysis, generated.files, outputPath);
 }
 ```
-**Why:** Zero overhead when feature is unused. No import cost, no module resolution.
+**Why:** Optional integrations remain explicit, credential-checked, and easy to disable without changing the default generation path.
 
 ### Graceful Degradation Pattern
 ```typescript
@@ -88,7 +91,7 @@ async function recordToHub(...): Promise<void> {
   try {
     // ... hub operations
   } catch (err) {
-    console.log(chalk.yellow("  ⚠"), `Hub unavailable: ${msg}`);
+    console.log(chalk.yellow("  ⚠"), `Hub setup failed; continuing without coordination: ${msg}`);
     // Never throw — caller continues normally
   }
 }
@@ -101,8 +104,10 @@ const sanitized = repoName
   .toLowerCase()
   .replace(/[^a-z0-9-]/g, "-")
   .replace(/-+/g, "-")
-  .replace(/^-|-$/g, "")
-  .slice(0, 20);
+  .replace(/^-|-$/g, "");
+const base = sanitized.length <= 19
+  ? sanitized
+  : `${sanitized.slice(0, 12)}-${shortHash(sanitized)}`;
 ```
 **Why:** External systems have naming constraints. Always sanitize before creating external resources.
 
@@ -110,9 +115,7 @@ const sanitized = repoName
 
 1. **Extract recording logic** — `recordToHub()` is duplicated across remote and local paths. Should be a shared post-generation hook.
 
-2. **Add integration test with real hub** — Current tests mock all HTTP. Would benefit from a docker-compose test with a real AgentHub instance.
-
-3. **Validate hub URL format in Generator constructor** — Currently passes through unchecked. A typo in `--hub` produces agents with broken coordination sections.
+2. **Add a CI-backed integration test with real hub** — The implementation has been smoke-tested against upstream AgentHub, but the live server check is not yet part of the automated suite.
 
 ## Related Files
 

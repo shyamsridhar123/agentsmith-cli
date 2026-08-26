@@ -32,16 +32,27 @@ describe("buildChannelNames", () => {
     expect(ch.exploration).toBe("my-weird-repo-exploration");
   });
 
-  it("truncates long names to 20 chars", () => {
+  it("keeps every generated channel within AgentHub's 31-char limit", () => {
     const ch = buildChannelNames("a-very-long-repository-name-that-exceeds-limits");
-    // The sanitized base should be at most 20 chars
-    const base = ch.exploration.replace("-exploration", "");
-    expect(base.length).toBeLessThanOrEqual(20);
+    expect(Object.values(ch).every((name) => name.length <= 31)).toBe(true);
+    expect(ch.exploration.replace("-exploration", "").length).toBeLessThanOrEqual(19);
+  });
+
+  it("keeps long repository names distinct after truncation", () => {
+    const gateway = buildChannelNames("payments-service-api-gateway");
+    const worker = buildChannelNames("payments-service-api-worker");
+
+    expect(gateway.results).not.toBe(worker.results);
   });
 
   it("strips leading and trailing dashes", () => {
     const ch = buildChannelNames("-leading-trailing-");
     expect(ch.exploration).toBe("leading-trailing-exploration");
+  });
+
+  it("uses a valid fallback for names without alphanumeric characters", () => {
+    const ch = buildChannelNames("@@@");
+    expect(ch.exploration).toBe("repo-exploration");
   });
 });
 

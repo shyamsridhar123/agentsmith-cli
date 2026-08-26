@@ -16,8 +16,18 @@ import { isPermissiveLicense } from "../utils/license.js";
 import type { AnalysisResult } from "../analyzer/index.js";
 import { FileCache, stableCacheKey } from "../cache/index.js";
 import { loadConfig } from "../config/index.js";
+import {
+  HubClient,
+  normalizeHubServerUrl,
+} from "../hub/client.js";
+import {
+  ensureCoordinationChannels,
+  postRunSummary,
+  recordRun,
+} from "../hub/recorder.js";
+import { buildChannelNames } from "../generator/hub-writer.js";
 
-interface AssimilateOptions {
+export interface AssimilateOptions {
   dryRun?: boolean;
   verbose?: boolean;
   output?: string;
@@ -37,6 +47,21 @@ export async function assimilateCommand(
     console.error(chalk.red("Error: --record requires --hub <url> to be set."));
     process.exitCode = 1;
     return;
+  }
+  if (options.hub) {
+    try {
+      options = {
+        ...options,
+        hub: normalizeHubServerUrl(options.hub),
+      };
+    } catch (error) {
+      console.error(
+        chalk.red("Error:"),
+        error instanceof Error ? error.message : String(error),
+      );
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const isRemote = isGitHubUrl(target);
@@ -79,6 +104,8 @@ export async function assimilateCommand(
 
     // Output path
     const outputPath = options.output || process.cwd();
+    const hubClient = await prepareHub(result.repoName, options);
+    const activeHubUrl = options.dryRun ? options.hub : hubClient?.getServerUrl();
 
     console.log(
       chalk.green("\n[GENERATE]"),
@@ -89,7 +116,7 @@ export async function assimilateCommand(
     const generator = new Generator(
       outputPath, options.dryRun, options.verbose,
       options.instructions === false, options.singleAgent,
-      options.hub,
+      activeHubUrl,
     );
     const generated = await generator.generate(result);
 
@@ -111,8 +138,8 @@ export async function assimilateCommand(
     }
 
     // Hub recording (opt-in)
-    if (options.hub && options.record && !options.dryRun) {
-      await recordToHub(options.hub, result, generated.files, outputPath, options.verbose);
+    if (hubClient && options.record && !options.dryRun) {
+      await recordToHub(hubClient, result, generated.files, outputPath, options.verbose);
     }
 
     // Summary
@@ -212,7 +239,11 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       console.log(chalk.green(`  ✓ ${license.name} - permissive license`));
     }
 
-    const outputPath = config.output ? path.resolve(resolved.path, config.output) : resolved.path;
+    const outputPath = config.output
+      ? path.resolve(resolved.path, config.output)
+      : resolved.path;
+    const hubClient = await prepareHub(analysisResult.repoName, options);
+    const activeHubUrl = options.dryRun ? options.hub : hubClient?.getServerUrl();
 
     console.log(
       chalk.green("\n[GENERATE]"),
@@ -222,7 +253,7 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
     const generator = new Generator(
       outputPath, options.dryRun, config.verbose,
       config.instructions === false, config.singleAgent,
-      options.hub,
+      activeHubUrl,
     );
     const generated = await generator.generate(analysisResult);
 
@@ -241,8 +272,14 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
     }
 
     // Hub recording (opt-in)
-    if (options.hub && options.record && !options.dryRun) {
-      await recordToHub(options.hub, analysisResult, generated.files, outputPath, options.verbose);
+    if (hubClient && options.record && !options.dryRun) {
+      await recordToHub(
+        hubClient,
+        analysisResult,
+        generated.files,
+        outputPath,
+        options.verbose,
+      );
     }
 
     const localAgentCount = generated.files.filter(f => f.endsWith(".agent.md")).length;
@@ -263,35 +300,87 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
   }
 }
 
+export async function prepareHub(
+  repoName: string,
+  options: AssimilateOptions,
+): Promise<HubClient | undefined> {
+  if (!options.hub || options.dryRun) return undefined;
+
+  try {
+    console.log(chalk.green("\n[HUB]"), "Preparing AgentHub coordination...");
+    const client = await HubClient.fromConfigFile(options.hub, {
+      timeoutMs: 5_000,
+      maxRetries: 1,
+    });
+    await client.health();
+    try {
+      const created = await ensureCoordinationChannels(repoName, client);
+      if (options.verbose) {
+        if (created.length > 0) {
+          console.log(chalk.gray(`  └── Created channels: ${created.join(", ")}`));
+        } else {
+          console.log(chalk.gray("  └── Coordination channels already exist"));
+        }
+      }
+    } catch (error) {
+      console.log(
+        chalk.yellow("  ⚠"),
+        `Channel setup failed; recording remains available: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return client;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(
+      chalk.yellow("  ⚠"),
+      `AgentHub setup failed; continuing without coordination: ${message}`,
+    );
+    return undefined;
+  }
+}
+
 /**
  * Record an assimilation run to AgentHub (opt-in via --hub --record).
  * Failures are logged and never block the pipeline.
  */
-async function recordToHub(
-  hubUrl: string,
+export async function recordToHub(
+  client: HubClient,
   analysis: AnalysisResult,
   generatedFilePaths: string[],
   outputPath: string,
   verbose?: boolean,
 ): Promise<void> {
   try {
-    const { HubClient } = await import("../hub/client.js");
-    const { recordRun, postRunSummary } = await import("../hub/recorder.js");
-    const { buildChannelNames } = await import("../generator/hub-writer.js");
-
     console.log(chalk.green("\n[HUB]"), "Recording run to AgentHub...");
 
-    const client = await HubClient.fromConfigFile(hubUrl);
-
     const fileContents = new Map<string, string>();
-    for (const filePath of generatedFilePaths) {
-      try {
-        const fullPath = path.join(outputPath, filePath);
-        const content = await fs.readFile(fullPath, "utf-8");
-        fileContents.set(filePath, content);
-      } catch {
-        // File may not exist in dry-run
+    for (const filePath of new Set(generatedFilePaths)) {
+      const fullPath = path.resolve(outputPath, filePath);
+      const relativePath = path.relative(outputPath, fullPath);
+      if (
+        relativePath === ".." ||
+        relativePath.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativePath)
+      ) {
+        throw new Error(`Refusing to record file outside output path: ${filePath}`);
       }
+      const content = await fs.readFile(fullPath, "utf-8");
+      fileContents.set(filePath, content);
+    }
+    const registryPath = path.resolve(outputPath, "skills-registry.jsonl");
+    try {
+      fileContents.set(
+        "skills-registry.jsonl",
+        await fs.readFile(registryPath, "utf-8"),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      console.log(
+        chalk.yellow("  ⚠"),
+        "skills-registry.jsonl was not found; recording generated assets without it",
+      );
     }
 
     const result = await recordRun(analysis, fileContents, client);
@@ -301,14 +390,18 @@ async function recordToHub(
 
       const channels = buildChannelNames(analysis.repoName);
       const posted = await postRunSummary(analysis, channels.results, client, result.commitHash);
-      if (posted && verbose) {
-        console.log(chalk.gray(`  └── Summary posted to #${channels.results}`));
+      if (posted) {
+        if (verbose) {
+          console.log(chalk.gray(`  └── Summary posted to #${channels.results}`));
+        }
+      } else {
+        console.log(chalk.yellow("  ⚠"), `Run recorded, but posting to #${channels.results} failed`);
       }
     } else {
       console.log(chalk.yellow("  ⚠"), `Hub recording skipped: ${result.error}`);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(chalk.yellow("  ⚠"), `Hub unavailable: ${msg}`);
+    console.log(chalk.yellow("  ⚠"), `Hub recording failed: ${msg}`);
   }
 }

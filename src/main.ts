@@ -140,8 +140,9 @@ hub
   .description("Register this agent with an AgentHub server")
   .argument("<server-url>", "AgentHub server URL")
   .argument("<agent-id>", "Agent identifier to register")
+  .option("--force", "Replace credentials for a different configured hub")
   .option("-v, --verbose", "Show extra details")
-  .action((url: string, id: string, opts: { verbose?: boolean }) =>
+  .action((url: string, id: string, opts: { verbose?: boolean; force?: boolean }) =>
     hubCommand("register", [url, id], opts));
 
 hub

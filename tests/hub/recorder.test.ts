@@ -3,15 +3,28 @@
  * Run provenance recording to AgentHub.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { recordRun, postRunSummary } from "../../src/hub/recorder.js";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import {
+  ensureCoordinationChannels,
+  recordRun,
+  postRunSummary,
+} from "../../src/hub/recorder.js";
 import type { AnalysisResult } from "../../src/analyzer/types.js";
 
 // Mock child_process
+const { execFileMock } = vi.hoisted(() => ({
+  execFileMock: vi.fn(),
+}));
+
 vi.mock("node:child_process", () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], cb: Function) => {
-    cb(null, "", "");
-  }),
+  execFile: execFileMock,
 }));
 
 // Mock fs/promises
@@ -25,6 +38,21 @@ vi.mock("node:fs/promises", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  process.env.GIT_DIR = "caller-repository";
+  execFileMock.mockImplementation(
+    (
+      _cmd: string,
+      _args: string[],
+      _options: object,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      callback(null, "", "");
+    },
+  );
+});
+
+afterEach(() => {
+  delete process.env.GIT_DIR;
 });
 
 // --- Helpers ---
@@ -61,7 +89,7 @@ function makeAnalysis(overrides: Partial<AnalysisResult> = {}): AnalysisResult {
 
 function makeMockClient() {
   return {
-    pushBundle: vi.fn().mockResolvedValue({ hash: "abc123def456" }),
+    pushBundle: vi.fn().mockResolvedValue({ hashes: ["abc123def456"] }),
     post: vi.fn().mockResolvedValue({ id: 1 }),
     createChannel: vi.fn().mockResolvedValue({ id: 1, name: "test" }),
     listChannels: vi.fn().mockResolvedValue([]),
@@ -86,30 +114,75 @@ describe("recordRun", () => {
     expect(result.commitHash).toBe("abc123def456");
     expect(client.pushBundle).toHaveBeenCalledOnce();
 
-    // Check the push included base64 bundle and commit message
-    const [bundle, message] = client.pushBundle.mock.calls[0];
-    expect(typeof bundle).toBe("string");
-    expect(message).toContain("test-repo");
-    expect(message).toContain("1 skills");
+    const [bundle] = client.pushBundle.mock.calls[0];
+    expect(bundle).toEqual(Buffer.from("fake-bundle-data"));
+    expect(execFileMock).toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["init"]),
+      expect.objectContaining({
+        env: expect.objectContaining({
+          GIT_CONFIG_NOSYSTEM: "1",
+        }),
+      }),
+      expect.any(Function),
+    );
+    const gitEnvironment = execFileMock.mock.calls[0][2].env;
+    expect(gitEnvironment.GIT_DIR).toBeUndefined();
   });
 
   it("returns error result when pushBundle fails", async () => {
     const client = makeMockClient();
     client.pushBundle.mockRejectedValueOnce(new Error("Network error"));
 
-    const result = await recordRun(makeAnalysis(), new Map(), client);
+    const result = await recordRun(
+      makeAnalysis(),
+      new Map([[".github/agents/test.agent.md", "# Test"]]),
+      client,
+    );
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("Network error");
   });
 
-  it("handles empty file map gracefully", async () => {
+  it("rejects an empty file map", async () => {
     const client = makeMockClient();
 
     const result = await recordRun(makeAnalysis(), new Map(), client);
 
-    expect(result.success).toBe(true);
-    expect(client.pushBundle).toHaveBeenCalledOnce();
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("No generated files");
+    expect(client.pushBundle).not.toHaveBeenCalled();
+  });
+
+  it("rejects paths outside the temporary run directory", async () => {
+    const client = makeMockClient();
+
+    const result = await recordRun(
+      makeAnalysis(),
+      new Map([["../escaped.txt", "nope"]]),
+      client,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("outside the run directory");
+    expect(client.pushBundle).not.toHaveBeenCalled();
+  });
+});
+
+describe("ensureCoordinationChannels", () => {
+  it("creates only missing coordination channels", async () => {
+    const client = makeMockClient();
+    client.listChannels.mockResolvedValueOnce([
+      { id: 1, name: "test-repo-results" },
+    ]);
+
+    const created = await ensureCoordinationChannels("test-repo", client);
+
+    expect(created).toEqual([
+      "test-repo-exploration",
+      "test-repo-reviews",
+    ]);
+    expect(client.createChannel).toHaveBeenCalledTimes(2);
   });
 });
 

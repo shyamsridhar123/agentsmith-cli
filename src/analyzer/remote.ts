@@ -144,7 +144,6 @@ export class RemoteAnalyzer {
 
       let responseContent = "";
       let streamedContent = "";
-      let eventCount = 0;
 
       const done = new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
@@ -155,7 +154,6 @@ export class RemoteAnalyzer {
         }, 120000);
 
         session.on((event) => {
-          eventCount++;
           const eventType = event.type as string;
           const eventData = event.data as Record<string, unknown>;
 

@@ -6,6 +6,7 @@
 
 import type { HubCoordinationConfig } from "../hub/types.js";
 import type { HandoffGraph } from "./handoff-writer.js";
+import { createHash } from "node:crypto";
 
 /**
  * Build a coordination section for the root orchestrator agent.
@@ -81,12 +82,17 @@ export function buildChannelNames(repoName: string): {
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 20);
+    .replace(/^-|-$/g, "") || "repo";
+  const base = sanitized.length <= 19
+    ? sanitized
+    : `${sanitized.slice(0, 12).replace(/-$/, "")}-${createHash("sha256")
+      .update(sanitized)
+      .digest("hex")
+      .slice(0, 6)}`;
 
   return {
-    exploration: `${sanitized}-exploration`,
-    results: `${sanitized}-results`,
-    reviews: `${sanitized}-reviews`,
+    exploration: `${base}-exploration`,
+    results: `${base}-results`,
+    reviews: `${base}-reviews`,
   };
 }

@@ -48,6 +48,24 @@ function mockOk(body: unknown): Response {
   } as unknown as Response;
 }
 
+function mockText(body: string): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    text: () => Promise.resolve(body),
+  } as unknown as Response;
+}
+
+function mockBytes(body: Uint8Array): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    arrayBuffer: () => Promise.resolve(body.buffer),
+  } as unknown as Response;
+}
+
 function mock404(): Response {
   return {
     ok: false,
@@ -79,12 +97,36 @@ describe("HubClient", () => {
       const client = new HubClient(makeConfig({ agentId: "neo" }));
       expect(client.getAgentId()).toBe("neo");
     });
+
+    it("rejects server URLs containing credentials", () => {
+      expect(
+        () => new HubClient(makeConfig({
+          serverUrl: "https://agent:secret@hub.example",
+        })),
+      ).toThrow(/embedded credentials/);
+    });
+
+    it("rejects server URLs containing query strings or fragments", () => {
+      expect(
+        () => new HubClient(makeConfig({
+          serverUrl: "https://hub.example?token=secret",
+        })),
+      ).toThrow(/query string or fragment/);
+    });
+
+    it("clamps maxRetries to at least one attempt", async () => {
+      const client = new HubClient(makeConfig(), { maxRetries: 0 });
+      mockFetch.mockResolvedValueOnce(mockOk({ status: "ok" }));
+
+      await expect(client.health()).resolves.toEqual({ status: "ok" });
+      expect(mockFetch).toHaveBeenCalledOnce();
+    });
   });
 
   describe("fromConfigFile", () => {
     it("loads config from ~/.agenthub/config.json", async () => {
       mockReadFile.mockResolvedValueOnce(
-        JSON.stringify({ serverUrl: "http://hub:9000", apiKey: "key", agentId: "a1" }),
+        JSON.stringify({ server_url: "http://hub:9000", api_key: "key", agent_id: "a1" }),
       );
 
       const client = await HubClient.fromConfigFile();
@@ -92,20 +134,40 @@ describe("HubClient", () => {
       expect(client.getAgentId()).toBe("a1");
     });
 
-    it("uses provided serverUrl over config file", async () => {
+    it("accepts a matching provided serverUrl", async () => {
       mockReadFile.mockResolvedValueOnce(
-        JSON.stringify({ serverUrl: "http://old:9000", apiKey: "key", agentId: "a1" }),
+        JSON.stringify({ server_url: "http://hub:9000/", api_key: "key", agent_id: "a1" }),
       );
 
-      const client = await HubClient.fromConfigFile("http://override:8080");
-      expect(client.getServerUrl()).toBe("http://override:8080");
+      const client = await HubClient.fromConfigFile("http://hub:9000");
+      expect(client.getServerUrl()).toBe("http://hub:9000");
+    });
+
+    it("refuses to reuse credentials for a different server", async () => {
+      mockReadFile.mockResolvedValueOnce(
+        JSON.stringify({ server_url: "http://old:9000", api_key: "key", agent_id: "a1" }),
+      );
+
+      await expect(
+        HubClient.fromConfigFile("http://different:8080"),
+      ).rejects.toThrow(/refusing to send them/);
+    });
+
+    it("supports legacy camelCase config keys", async () => {
+      mockReadFile.mockResolvedValueOnce(
+        JSON.stringify({ serverUrl: "http://legacy:9000", apiKey: "key", agentId: "a1" }),
+      );
+
+      const client = await HubClient.fromConfigFile();
+      expect(client.getServerUrl()).toBe("http://legacy:9000");
     });
 
     it("throws HubClientError when config file missing", async () => {
       mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
 
-      await expect(HubClient.fromConfigFile()).rejects.toThrow(HubClientError);
-      await expect(HubClient.fromConfigFile()).rejects.toThrow(/agentsmith hub register/);
+      const request = HubClient.fromConfigFile();
+      await expect(request).rejects.toThrow(HubClientError);
+      await expect(request).rejects.toThrow(/agentsmith hub register/);
     });
   });
 
@@ -176,10 +238,24 @@ describe("HubClient", () => {
   describe("git operations", () => {
     it("pushes a bundle", async () => {
       const client = new HubClient(makeConfig());
-      mockFetch.mockResolvedValueOnce(mockOk({ hash: "abc123" }));
+      mockFetch.mockResolvedValueOnce(mockOk({ hashes: ["abc123"] }));
 
-      const commit = await client.pushBundle("base64data", "test msg");
-      expect(commit.hash).toBe("abc123");
+      const bundle = new Uint8Array([1, 2, 3]);
+      const result = await client.pushBundle(bundle);
+      expect(result.hashes).toEqual(["abc123"]);
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.headers["Content-Type"]).toBe("application/octet-stream");
+      expect(init.body).toBe(bundle);
+    });
+
+    it("downloads a raw git bundle", async () => {
+      const client = new HubClient(makeConfig());
+      mockFetch.mockResolvedValueOnce(mockBytes(new Uint8Array([4, 5, 6])));
+
+      await expect(client.fetchCommit("abc123")).resolves.toEqual(
+        new Uint8Array([4, 5, 6]),
+      );
     });
 
     it("lists commits with pagination", async () => {
@@ -203,10 +279,10 @@ describe("HubClient", () => {
 
     it("gets diff between two commits", async () => {
       const client = new HubClient(makeConfig());
-      mockFetch.mockResolvedValueOnce(mockOk({ diff: "---diff---", hash_a: "a", hash_b: "b" }));
+      mockFetch.mockResolvedValueOnce(mockText("---diff---"));
 
       const result = await client.diff("a", "b");
-      expect(result.diff).toBe("---diff---");
+      expect(result).toBe("---diff---");
     });
   });
 
@@ -231,6 +307,43 @@ describe("HubClient", () => {
       const result = await client.health();
       expect(result.status).toBe("ok");
       expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not retry POST requests", async () => {
+      const client = new HubClient(makeConfig(), 100);
+      mockFetch.mockRejectedValueOnce(new Error("connection reset"));
+
+      await expect(client.registerAgent("smith")).rejects.toThrow("connection reset");
+      expect(mockFetch).toHaveBeenCalledOnce();
+    });
+
+    it("does not retry invalid JSON after a successful response", async () => {
+      const client = new HubClient(makeConfig(), 100);
+      mockFetch.mockResolvedValueOnce(mockText("not-json"));
+
+      await expect(client.health()).rejects.toThrow(/invalid JSON/);
+      expect(mockFetch).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the timeout active while reading the response body", async () => {
+      const client = new HubClient(makeConfig(), 100);
+      let resolveBody!: (value: string) => void;
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: () => new Promise<string>((resolve) => {
+          resolveBody = resolve;
+        }),
+      } as unknown as Response);
+
+      const request = client.health();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+
+      resolveBody(JSON.stringify({ status: "ok" }));
+      await expect(request).resolves.toEqual({ status: "ok" });
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 });

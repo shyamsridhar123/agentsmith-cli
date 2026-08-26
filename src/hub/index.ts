@@ -1,12 +1,18 @@
-export { HubClient, HubClientError } from "./client.js";
+export {
+  HubClient,
+  HubClientError,
+  normalizeHubServerUrl,
+} from "./client.js";
+export type { HubClientOptions } from "./client.js";
 export type {
   HubConfig,
+  HubConfigFile,
   HubAgent,
+  HubPushResponse,
   HubCommit,
   HubChannel,
   HubPost,
   HubHealthResponse,
-  HubDiffResponse,
   HubListOptions,
   HubCoordinationConfig,
 } from "./types.js";

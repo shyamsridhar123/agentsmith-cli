@@ -10,9 +10,19 @@ export interface HubConfig {
   agentId: string;
 }
 
+export interface HubConfigFile {
+  server_url: string;
+  api_key: string;
+  agent_id: string;
+}
+
 export interface HubAgent {
   id: string;
   api_key: string;
+}
+
+export interface HubPushResponse {
+  hashes: string[];
 }
 
 export interface HubCommit {
@@ -41,12 +51,6 @@ export interface HubPost {
 
 export interface HubHealthResponse {
   status: string;
-}
-
-export interface HubDiffResponse {
-  diff: string;
-  hash_a: string;
-  hash_b: string;
 }
 
 export interface HubListOptions {
