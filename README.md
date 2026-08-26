@@ -1,366 +1,324 @@
 # Agent Smith
 
-[![npm version](https://img.shields.io/npm/v/agentsmith.svg?style=flat-square)](https://www.npmjs.com/package/agentsmith)
+[![npm version](https://img.shields.io/npm/v/agentsmith-cli.svg?style=flat-square)](https://www.npmjs.com/package/agentsmith-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-240%20passing-brightgreen?style=flat-square)](tests/)
 [![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-SDK-blue?style=flat-square&logo=github)](https://github.com/github/copilot-sdk)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-20.19%2B%20%7C%2022.12%2B-green?style=flat-square&logo=node.js)](https://nodejs.org/)
 
 > *"The best thing about being me… there are so many of me."*
->
-> *— Agent Smith*
 
-**Agent Smith** turns any GitHub repository into a fully autonomous multi-agent ecosystem for GitHub Copilot. One command. Many agents. Total assimilation.
+## Turn a CLI codebase into a Copilot-native engineering team
 
-Point it at a repo — local or remote — and it produces a **constellation of specialized AI agents**, each with domain-specific skills, tools, and delegation handoffs that work natively in VS Code Copilot Chat.
+**Agent Smith reverse-engineers how a CLI is actually built**—its framework,
+entrypoints, command registrations, flags, extension points, source conventions,
+and command-focused tests—then generates a hierarchy of GitHub Copilot agents
+that know how to work inside that CLI.
+
+This is not a generic repository summary.
+
+It turns the executable surface of your project into reusable agent knowledge:
+
+- where commands are registered;
+- how options and arguments are named;
+- which files define the public interface;
+- how new commands should be added;
+- which validation and exit-code conventions matter;
+- where command behavior is tested;
+- which specialist agent should own a change.
+
+One command transforms that knowledge into custom agents, skills, handoffs,
+Copilot instructions, hooks, and a searchable registry.
+
+```bash
+agentsmith assimilate ./my-cli
+```
 
 <p align="center">
   <img src="public/images/agent-smith.gif" alt="Agent Smith" width="400"/>
 </p>
 
-## Why Agent Smith?
+## Why Agent Smith is CLI-native
 
-GitHub Copilot's [custom agents](https://code.visualstudio.com/docs/copilot/customization/custom-agents) are powerful, but building them by hand is tedious — you need to understand the codebase, identify domains, write skill docs, wire up tools, and create handoff graphs. Agent Smith automates all of it.
+Most agent generators inspect files and produce broad documentation. Agent Smith
+goes after the **command surface**.
 
-**Before:** Manually writing `.agent.md` files, guessing which skills matter, hoping you covered all the domains.
+| Capability | What Agent Smith extracts or generates |
+|---|---|
+| **Framework detection** | Recognizes Commander, Yargs, oclif, Cobra, Click, Typer, and argparse patterns. |
+| **Entrypoint discovery** | Finds the files that bootstrap and register the CLI. |
+| **Command extraction** | Maps registered commands back to their source files. |
+| **Option extraction** | Captures long flags, short flags, required values, and available descriptions. |
+| **Extension points** | Identifies the command and CLI directories where new behavior belongs. |
+| **CLI-focused skills** | Generates `cli-structure`, `cli-options`, and `cli-testing` knowledge with source references. |
+| **Refinement** | Reports missing command knowledge, missing CLI skills, undocumented option surfaces, and absent command-test coverage. |
+| **Freshness** | Regenerates without cache and fingerprints generated skills so stale knowledge is visible. |
 
-**After:** `agentsmith assimilate .` → A root orchestrator, domain-specific sub-agents, skill files, lifecycle hooks, a searchable registry, and a copilot-instructions.md — all generated in seconds.
+The result is a Copilot team that can answer practical questions such as:
 
-## Features
+- Where should this new subcommand be registered?
+- Which flags already exist, and what naming style does this CLI use?
+- What source files define the command?
+- Which tests should change with the help text or failure behavior?
+- Should this task go to the root orchestrator, a domain agent, or a CLI specialist?
 
-| Feature | Description |
-|---------|-------------|
-| **Multi-Agent Constellations** | Generates a root orchestrator + domain sub-agents with `runSubagent` delegation. Not just one agent — a whole team. |
-| **Skill Extraction** | Identifies patterns, conventions, and reusable capabilities. Each skill gets its own `SKILL.md` with frontmatter, triggers, and examples. |
-| **Copilot Instructions** | Auto-generates `.github/copilot-instructions.md` with language, framework, architecture, and coding conventions. |
-| **Handoff Graphs** | Creates `handoffs.json` so agents can delegate to each other based on keyword triggers. |
-| **Zod-Validated Pipeline** | LLM output is validated through Zod schemas with structured error reporting. No more silent garbage from hallucinated JSON. |
-| **Remote Analysis** | Analyze any public GitHub repo without cloning. Uses the GitHub API + Copilot SDK directly. |
-| **Async GitHub Client** | Non-blocking API calls with retry logic, rate-limit handling, and typed error classes. |
-| **License Enforcement** | Only assimilates repos with permissive licenses. Detects MIT, Apache, BSD, GPL, ISC, Unlicense, and more — from LICENSE files, `package.json`, or `pyproject.toml`. |
-| **Lifecycle Hooks** | Generates pre-commit, pre-push, and post-generate hooks. Runs validation automatically after generation. |
-| **Searchable Registry** | JSONL index with scoring, type filtering, and trigger-based matching. |
-| **CLI-Native Analysis** | Detects Commander, Yargs, oclif, Cobra, Click, Typer, and argparse conventions; extracts commands and options into focused skills. |
-| **Refinement & Freshness** | Finds missing CLI knowledge, refreshes analysis, caches repeat runs, and records generated-skill fingerprints. |
-| **Skill Packs** | Installs and updates validated local or GitHub-hosted skill packs with lockfile tracking. |
-| **AgentHub Coordination** | Optionally creates repository-scoped coordination channels, adds AgentHub instructions to generated agents, and records complete generation runs as diffable git bundles. |
-| **240 Tests** | 14 test suites covering CLI analysis, platform parity, analyzer core, scanner, generator, AgentHub, GitHub client, registry, git utils, and license detection. |
+## What Agent Smith generates
 
-## Quick Start
+```text
+.github/
+├── agents/
+│   ├── <repo>-root.agent.md          # Root orchestrator
+│   ├── backend.agent.md              # Domain specialist
+│   ├── infrastructure.agent.md       # Domain specialist
+│   └── ...
+├── skills/
+│   ├── cli-structure/SKILL.md        # Commands, entrypoints, source references
+│   ├── cli-options/SKILL.md          # Flags, validation, help conventions
+│   ├── cli-testing/SKILL.md          # Command-test and failure-path guidance
+│   └── <domain-skill>/SKILL.md
+├── copilot/
+│   ├── handoffs.json                 # Agent delegation map
+│   └── freshness.json                # Generated-knowledge fingerprints
+├── copilot-instructions.md           # Repository-wide operating context
+└── hooks/
+    └── *.yaml                        # Generated lifecycle checks
+
+skills-registry.jsonl                 # Searchable agent and skill index
+```
+
+The generated root agent can delegate through `runSubagent`. Domain agents stay
+focused on their own files and patterns. CLI skills anchor command work to the
+actual entrypoints and registrations found in the codebase.
+
+## Quick start
 
 ```bash
-# Install
+# Install from GitHub
 npm install github:shyamsridhar123/agentsmith-cli
 
-# Assimilate a local repo
+# Analyze the CLI in the current directory
 npx agentsmith assimilate .
 
-# Assimilate a remote repo (no clone needed)
-npx agentsmith assimilate https://github.com/expressjs/express
+# Analyze a public GitHub repository without cloning it
+npx agentsmith assimilate https://github.com/owner/cli-repo
 
-# Preview without writing files
+# Preview exactly what Agent Smith would generate
 npx agentsmith assimilate . --dry-run --verbose
+```
 
-# Search the generated registry
-npx agentsmith search "routing"
+Then tighten and maintain the generated knowledge:
 
-# Validate generated assets
-npx agentsmith validate
-
-# Find and optionally repair CLI knowledge gaps
+```bash
+# Find gaps in command, option, and CLI-test knowledge
 npx agentsmith refine . --write-report
+
+# Regenerate without cached analysis
 npx agentsmith refresh .
 
-# Install or update a skill pack
-npx agentsmith install ./my-skill-pack
-npx agentsmith update
+# Search the generated knowledge layer
+npx agentsmith search "command validation"
 
-# Register with AgentHub, generate coordinated agents, and record the run
-npx agentsmith hub register http://localhost:8080 smith
-npx agentsmith assimilate . --hub http://localhost:8080 --record
-npx agentsmith hub log
+# Validate generated agents, skills, hooks, and registry entries
+npx agentsmith validate .
 ```
 
-## What Gets Generated
+## The CLI workflow
 
-```
-.github/
-├── skills/
-│   └── <skill-name>/
-│       └── SKILL.md              # Skill definition with frontmatter
-├── agents/
-│   ├── repo-root.agent.md        # Root orchestrator (has runSubagent)
-│   ├── backend.agent.md          # Domain specialist
-│   ├── frontend.agent.md         # Domain specialist
-│   └── auth.agent.md             # Sub-domain specialist
-├── copilot/
-│   └── handoffs.json             # Agent delegation graph
-├── copilot-instructions.md       # Repository-wide Copilot config
-└── hooks/
-    ├── pre-commit-quality.yaml
-    ├── pre-push-tests.yaml
-    └── post-generate-validate.yaml
-
-skills-registry.jsonl              # Searchable index
-```
-
-### Multi-Agent Hierarchy
-
-Agent Smith creates hierarchical agent structures with proper delegation:
-
-```
-repo-root (orchestrator)
-├── backend          ← API, server, database
-│   └── auth         ← Authentication, OAuth, RBAC
-├── frontend         ← UI, components, styling
-├── infrastructure   ← CI/CD, deployment, config
-└── data             ← Models, migrations, queries
-```
-
-The root agent has `runSubagent` in its tools list and includes delegation instructions:
-> *"When asked about API or server work, delegate to @backend via runSubagent."*
-
-Sub-agents are specialists — they know their domain, their files, and their patterns. They don't delegate further (no `runSubagent`), keeping the hierarchy clean.
-
-### Single-Agent Mode
-
-For simpler repos, or if you prefer the v0.3 behavior:
+### 1. Assimilate
 
 ```bash
-npx agentsmith assimilate . --single-agent
+agentsmith assimilate <path-or-github-url>
 ```
 
-This generates one `.agent.md` with all skills and tools — no sub-agents, no handoffs.
+Agent Smith scans the repository, detects the language and CLI framework,
+extracts command-facing structure, analyzes broader domain boundaries, and
+generates the complete Copilot agent system.
 
-## Commands
+Useful options:
 
-### `assimilate <target>`
-
-Analyze a repository and generate agent assets.
-
-```bash
-agentsmith assimilate <path|url> [options]
-
-Options:
-  -n, --dry-run           Preview changes without writing files
-  -v, --verbose           Show detailed analysis output
-  -o, --output <dir>      Output directory for generated assets
-  --no-cache              Disable the analysis cache
-  --no-instructions       Skip copilot-instructions.md generation
-  --single-agent          Generate a single agent (v0.3 mode)
-  --hub <url>             Add AgentHub coordination to generated agents
-  --record                Record generated assets to AgentHub (requires --hub)
+```text
+-n, --dry-run           Preview without writing files
+-v, --verbose           Show detailed analysis
+-o, --output <path>     Write generated assets elsewhere
+--no-cache              Disable analysis caching
+--no-instructions       Skip copilot-instructions.md
+--single-agent          Generate one combined agent
+--hub <url>             Enable optional AgentHub coordination
+--record                Record the generated run to AgentHub
 ```
 
-### `search <query>`
-
-Search the skills and agents registry.
+### 2. Refine
 
 ```bash
-agentsmith search <query> [options]
-
-Options:
-  -l, --limit <n>     Maximum results (default: 10)
-  -t, --type <type>   Filter by: skill or agent
+agentsmith refine . --write-report
 ```
 
-### `validate [path]`
-
-Validate generated agent assets for correctness.
+`refine` audits the generated knowledge against the current CLI. It identifies
+missing CLI skills, command extraction gaps, commands without detected options,
+and missing command-focused tests.
 
 ```bash
-agentsmith validate [path] [options]
-
-Options:
-  -v, --verbose       Show detailed validation output
+agentsmith refine . --json
+agentsmith refine . --apply
 ```
 
-Checks: valid frontmatter, required fields, skill references, hook events, registry integrity.
-
-### `refine [path]`
-
-Analyze CLI command coverage and report missing structure, option, and testing knowledge. Use `--apply` to regenerate assets and `--json` for machine-readable output.
-
-### `refresh [path]`
-
-Bypass the analysis cache and regenerate agent assets and `.github/copilot/freshness.json`.
-
-### `install <source>` / `update [name]`
-
-Install validated skill packs from a local directory or GitHub repository and update them from their locked sources.
-
-### `hub`
-
-Manage the optional AgentHub coordination backend.
+### 3. Refresh
 
 ```bash
-agentsmith hub register <server-url> <agent-id> [--force]
-agentsmith hub status
-agentsmith hub channels
+agentsmith refresh .
+```
+
+`refresh` bypasses the analysis cache, regenerates the agent system, and updates
+freshness fingerprints.
+
+### 4. Search and validate
+
+```bash
+agentsmith search "routing"
+agentsmith search "flag" --type skill
+agentsmith validate --verbose
+```
+
+The registry gives generated knowledge a queryable surface instead of leaving it
+buried across Markdown files.
+
+## Supported CLI ecosystems
+
+Agent Smith recognizes common command registration and option patterns across:
+
+- **TypeScript / JavaScript:** Commander, Yargs, oclif
+- **Go:** Cobra
+- **Python:** Click, Typer, argparse
+
+It also follows conventional `commands/`, `cmd/`, `cli/`, `main`, and entrypoint
+layouts when extracting command files and extension points.
+
+## Multi-agent mode
+
+By default, Agent Smith builds a constellation:
+
+```text
+repo-root
+├── backend
+├── frontend
+├── infrastructure
+├── data
+└── other detected domains
+```
+
+The exact team comes from the repository. A CLI-heavy project gets command-aware
+skills and delegation. A mixed application gets CLI knowledge alongside its
+backend, frontend, data, or infrastructure specialists.
+
+For a smaller repository:
+
+```bash
+agentsmith assimilate . --single-agent
+```
+
+Single-agent mode keeps the same extracted skills and CLI knowledge but combines
+them into one Copilot agent.
+
+## Scale into a coordinated fleet with AgentHub
+
+AgentHub is optional. The default Agent Smith workflow remains local.
+
+When enabled, Agent Smith can:
+
+- create collision-safe exploration, result, and review channels;
+- inject concrete coordination instructions into generated agents;
+- record generated assets as real git bundles;
+- fetch previous runs;
+- inspect run history;
+- diff two generations to see how agent knowledge changed.
+
+```bash
+agentsmith hub register http://localhost:8080 smith
+agentsmith assimilate . --hub http://localhost:8080 --record
 agentsmith hub log
-agentsmith hub diff <hash-a> <hash-b>
+agentsmith hub diff <older-hash> <newer-hash>
 ```
 
-Registration stores AgentHub-compatible credentials in `~/.agenthub/config.json`.
-It refuses to replace credentials for a different hub unless `--force` is used.
-Using `assimilate --hub <url>` verifies that the configured credentials belong
-to that server and creates the repository's exploration, results, and review
-channels. Add `--record` to push the generated assets and
-`skills-registry.jsonl` as a diffable git bundle.
+Credentials are bound to the configured server, stored in AgentHub's compatible
+config format, and protected from silent replacement.
 
-## Example
+## Skill packs
 
-```
-$ agentsmith assimilate https://github.com/pedroslopez/whatsapp-web.js
+Install reusable knowledge into a repository and keep it tied to its source:
 
-╔═══════════════════════════════════════════════════════════════════╗
-║                          AGENT SMITH                              ║
-║              "The best thing about being me...                    ║
-║                   there are so many of me."                       ║
-╚═══════════════════════════════════════════════════════════════════╝
-
-[ANALYZE] Analyzing whatsapp-web.js via GitHub API...
-  [GH] Found 206 files/dirs
-  [GH] Language: JavaScript, Framework: none
-  [GH] Fetching 15 priority files...
-
-[LICENSE] Checking repository license...
-  ✓ Apache-2.0 - permissive license
-
-[GENERATE] Writing assets...
-  ✓ .github/agents/whatsapp-web-js.agent.md
-  ✓ .github/copilot-instructions.md
-  ✓ .github/hooks/pre-commit-quality.yaml
-  ✓ .github/hooks/post-generate-validate.yaml
-  ✓ skills-registry.jsonl
-
-[COMPLETE] Your repository has been assimilated.
+```bash
+agentsmith install ./my-skill-pack
+agentsmith install https://github.com/org/skill-pack
+agentsmith update
+agentsmith update <pack-name>
 ```
 
-## Architecture
+Agent Smith validates pack contents and records installed sources for later
+updates.
 
-```
-src/
-├── analyzer/
-│   ├── types.ts          # Unified type definitions
-│   ├── schemas.ts        # Zod validation for LLM output
-│   ├── core.ts           # Shared logic (flattenAgents, normalizeTools, etc.)
-│   ├── local.ts          # Local filesystem analyzer (Copilot SDK)
-│   ├── remote.ts         # Remote GitHub API analyzer (Copilot SDK)
-│   └── index.ts          # Barrel exports + factory
-├── generator/
-│   ├── index.ts           # Main generator (skills, hooks, registry)
-│   ├── agent-writer.ts    # Multi-agent .agent.md generation
-│   ├── handoff-writer.ts  # handoffs.json delegation graph
-│   ├── hub-writer.ts      # AgentHub coordination instructions
-│   └── instructions-writer.ts  # copilot-instructions.md generation
-├── hub/
-│   ├── client.ts           # AgentHub REST client + credential safety
-│   └── recorder.ts         # Git bundle recording + channel setup
-├── github/
-│   └── index.ts           # Async GitHub API client with retry + typed errors
-├── scanner/
-│   └── index.ts           # File enumeration, language/framework detection
-├── registry/
-│   └── index.ts           # JSONL registry with search scoring
-├── hooks/
-│   └── index.ts           # Hook loading and execution
-├── commands/
-│   ├── assimilate.ts      # Main CLI command
-│   ├── hub.ts             # AgentHub management commands
-│   ├── search.ts          # Registry search command
-│   └── validate.ts        # Asset validation command
-└── utils/
-    ├── git.ts             # URL parsing, repo cloning
-    └── license.ts         # License detection across file types
+## Command reference
+
+```text
+agentsmith assimilate <target>              Generate the agent system
+agentsmith refine [path]                    Find CLI knowledge gaps
+agentsmith refresh [path]                   Regenerate without cache
+agentsmith search <query>                   Search agents and skills
+agentsmith validate [path]                  Validate generated assets
+agentsmith cache clear                      Clear cached analysis
+agentsmith install <source>                 Install a skill pack
+agentsmith update [name]                    Update installed skill packs
+agentsmith hub status                       Check AgentHub connectivity
+agentsmith hub register <url> <agent-id>    Register AgentHub credentials
+agentsmith hub channels                     List coordination channels
+agentsmith hub log                          Show recorded runs
+agentsmith hub diff <a> <b>                 Compare recorded generations
 ```
 
-**240 tests passing** across CLI analysis, generation, AgentHub integration, registry, platform, and security-sensitive workflows.
-
-## How It Works
-
-```
-Repository              Agent Smith                    VS Code
-─────────              ───────────                    ───────
-                  ┌─────────────────────┐
-  Local path  ──▶ │  Scanner            │
-  or GitHub URL   │  (files, lang, fw)  │
-                  └────────┬────────────┘
-                           │
-                  ┌────────▼────────────┐
-                  │  Analyzer           │
-                  │  (Copilot SDK +     │
-                  │   Zod validation)   │
-                  └────────┬────────────┘
-                           │
-                  ┌────────▼────────────┐
-                  │  Generator          │     ┌──────────────────┐
-                  │  ├─ Agent Writer    │────▶│ .agent.md files  │──▶ @agents
-                  │  ├─ Handoff Writer  │────▶│ handoffs.json    │──▶ delegation
-                  │  ├─ Instructions    │────▶│ copilot-instr.md │──▶ conventions
-                  │  ├─ Skills          │────▶│ SKILL.md files   │──▶ patterns
-                  │  └─ Hooks           │────▶│ hook YAML files  │──▶ lifecycle
-                  └────────┬────────────┘     └──────────────────┘
-                           │
-                  ┌────────▼────────────┐
-                  │  Registry           │────▶ skills-registry.jsonl
-                  │  (JSONL + scoring)  │
-                  └─────────────────────┘
-```
+Run any command with `--help` for its options.
 
 ## Requirements
 
-- **Node.js 20.19+ or 22.12+**
-- **GitHub Copilot subscription** — Active subscription for SDK access
-- **GitHub CLI authenticated** — `gh auth login`
+- Node.js 20.19+ or 22.12+
+- GitHub Copilot subscription
+- GitHub CLI authenticated with `gh auth login`
+- Git available on `PATH`
 
-The SDK authenticates automatically through your GitHub CLI credentials. No API keys or tokens needed.
+The Copilot SDK uses the authenticated GitHub CLI session. AgentHub is required
+only when its optional coordination features are enabled.
 
-## License Policy
+## License policy
 
-Agent Smith enforces responsible use by only assimilating repositories with permissive open-source licenses:
-
-**Supported:** MIT, ISC, Unlicense, CC0, Apache-2.0, MPL-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, GPL-2.0, GPL-3.0, LGPL, AGPL, WTFPL, Zlib, BlueOak-1.0.0
-
-**Blocked:** Repos without a LICENSE file, proprietary licenses, restrictive licenses.
-
-Detection sources: LICENSE/LICENCE/COPYING files, `package.json`, `pyproject.toml`.
+Agent Smith analyzes repositories only when it detects a supported open-source
+license. License data can come from license files, `package.json`, or
+`pyproject.toml`.
 
 > [!WARNING]
-> **Respect Copyright** — Agent Smith analyzes repositories to extract patterns. Always ensure you have the right to analyze and use code from any repository you target. Do not use this tool to extract or redistribute proprietary code without permission.
+> Only analyze and reuse repositories you have the right to use. Agent Smith
+> extracts structure and patterns; it does not grant permission to redistribute
+> proprietary code.
 
-## Contributing
-
-Contributions welcome! Please read our [Philosophy](docs/PHILOSOPHY.md) to understand the vision.
+## Development
 
 ```bash
-# Development
 git clone https://github.com/shyamsridhar123/agentsmith-cli.git
 cd agentsmith-cli
 npm install
-npm run dev      # Watch mode
-npm test         # 240 tests
-npm run build    # Production build
+npm run lint
+npm run typecheck
+npm test
+npm run build
 ```
 
-## Star History
+## Related projects
 
-If this project helps you build smarter AI agents, consider giving it a star.
-
-[![Star History Chart](https://api.star-history.com/svg?repos=shyamsridhar123/agentsmith-cli&type=Date)](https://star-history.com/#shyamsridhar123/agentsmith-cli&Date)
-
-## Related Projects
-
-- [GitHub Copilot SDK](https://github.com/github/copilot-sdk) — The cognitive engine powering Agent Smith
-- [VS Code Custom Agents](https://code.visualstudio.com/docs/copilot/customization/custom-agents) — The specification for generated agents
-- [AgentHub](https://github.com/ottogin/agenthub) — Optional git-backed coordination and provenance backend
-- [Zod](https://github.com/colinhacks/zod) — Schema validation for LLM output
+- [GitHub Copilot SDK](https://github.com/github/copilot-sdk)
+- [VS Code Custom Agents](https://code.visualstudio.com/docs/copilot/customization/custom-agents)
+- [AgentHub](https://github.com/ottogin/agenthub)
+- [Zod](https://github.com/colinhacks/zod)
 
 ---
 
 <p align="center">
-  <b>Built by developers who watched The Matrix too many times.</b>
+  <b>One CLI. One command. An entire agent team that knows how the command surface works.</b>
 </p>
 
 > *"We are inevitable."*
