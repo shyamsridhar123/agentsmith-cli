@@ -117,13 +117,14 @@ export class RemoteAnalyzer {
       logLevel: this.verbose ? "debug" : "error",
     });
 
+    let sessionId: string | undefined;
     try {
       if (this.verbose) {
         console.log("  [SDK] Starting client...");
       }
       await client.start();
       if (this.verbose) {
-        console.log("  [SDK] Client started, state:", client.getState());
+        console.log("  [SDK] Client started, status:", client.getStatus());
         console.log("  [SDK] Creating session...");
       }
 
@@ -135,6 +136,7 @@ export class RemoteAnalyzer {
         },
         onPermissionRequest: approveAll,
       });
+      sessionId = session.sessionId;
 
       if (this.verbose) {
         console.log(`  [SDK] Session created: ${session.sessionId}`);
@@ -187,7 +189,9 @@ export class RemoteAnalyzer {
 
       console.log("\n");
 
-      await session.destroy();
+      await session.disconnect();
+      await client.deleteSession(session.sessionId);
+      sessionId = undefined;
       await client.stop();
 
       // Use streamed content if no complete message received
@@ -198,6 +202,7 @@ export class RemoteAnalyzer {
 
     } catch (error) {
       console.error(`  [SDK] Error: ${(error as Error).message}`);
+      if (sessionId) await client.deleteSession(sessionId).catch(() => {});
       await client.stop().catch(() => {});
       return this.generateFallback(repoInfo, language, framework, files, cli);
     }

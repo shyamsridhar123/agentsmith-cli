@@ -44,7 +44,7 @@ ${chalk.bold("Examples:")}
   $ agentsmith validate                                        # Validate generated assets
 
 ${chalk.bold("Requirements:")}
-  • Node.js 18+
+  • Node.js 20.19+ or 22.12+
   • GitHub Copilot subscription (for SDK access)
   • Copilot CLI installed and in PATH
 

@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/Tests-178%20passing-brightgreen?style=flat-square)](tests/)
 [![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-SDK-blue?style=flat-square&logo=github)](https://github.com/github/copilot-sdk)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green?style=flat-square&logo=node.js)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20.19%2B%20%7C%2022.12%2B-green?style=flat-square&logo=node.js)](https://nodejs.org/)
 
 > *"The best thing about being me… there are so many of me."*
 >
@@ -277,7 +277,7 @@ Repository              Agent Smith                    VS Code
 
 ## Requirements
 
-- **Node.js 18+**
+- **Node.js 20.19+ or 22.12+**
 - **GitHub Copilot subscription** — Active subscription for SDK access
 - **GitHub CLI authenticated** — `gh auth login`
 

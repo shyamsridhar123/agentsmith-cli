@@ -45,6 +45,7 @@ export class Analyzer {
       console.log("  [SDK] Starting client...");
     }
 
+    let sessionId: string | undefined;
     try {
       await this.client.start();
     } catch (error) {
@@ -75,6 +76,7 @@ export class Analyzer {
         },
         onPermissionRequest: approveAll,
       });
+      sessionId = session.sessionId;
 
       if (this.verbose) {
         console.log("  [SDK] Session created successfully");
@@ -161,7 +163,7 @@ export class Analyzer {
       // Parse the response
       const result = this.buildResult(responseContent, scanResult, cli);
 
-      await session.destroy();
+      await session.disconnect();
       return result;
     } catch (error) {
       console.error(`\n  [SDK] Error: ${(error as Error).message}`);
@@ -170,6 +172,7 @@ export class Analyzer {
     } finally {
       if (this.client) {
         try {
+          if (sessionId) await this.client.deleteSession(sessionId);
           await this.client.stop();
         } catch {
           // Ignore cleanup errors
