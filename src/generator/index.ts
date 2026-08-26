@@ -7,8 +7,13 @@
 
 import fs from "fs/promises";
 import path from "path";
+import crypto from "crypto";
 import type { AnalysisResult, SkillDefinition, AgentDefinition, HookDefinition } from "../analyzer/index.js";
-import { buildCopilotInstructions, mergeWithExisting } from "./instructions-writer.js";
+import {
+  buildCopilotInstructions,
+  buildDirectoryInstructions,
+  mergeWithExisting,
+} from "./instructions-writer.js";
 import { buildRootAgentMd, buildSubAgentMd } from "./agent-writer.js";
 import { buildHandoffGraph, serializeHandoffGraph } from "./handoff-writer.js";
 
@@ -87,6 +92,7 @@ export class Generator {
     if (!this.noInstructions) {
       const instructionsPath = await this.generateCopilotInstructions(analysis);
       files.push(instructionsPath);
+      files.push(...await this.generateDirectoryInstructions(analysis));
     }
 
     // Generate hook.yaml for each hook (unchanged)
@@ -94,6 +100,8 @@ export class Generator {
       const hookPath = await this.generateHook(hook, hooksDir);
       files.push(hookPath);
     }
+
+    files.push(await this.generateFreshness(analysis));
 
     return { files };
   }
@@ -191,6 +199,13 @@ export class Generator {
       ? skill.examples.map((e) => `\`\`\`\n${e}\n\`\`\``).join("\n\n")
       : "See source files in the repository for examples.";
 
+    const antiPatterns = skill.antiPatterns && skill.antiPatterns.length > 0
+      ? `\n## Anti-Patterns\n\n${skill.antiPatterns.map((item) => `- ${item}`).join("\n")}\n`
+      : "";
+    const references = skill.codebaseReferences && skill.codebaseReferences.length > 0
+      ? `\n## Codebase References\n\nUse \`#codebase\` to inspect:\n\n${skill.codebaseReferences.map((item) => `- \`${item}\``).join("\n")}\n`
+      : "";
+
     return `---
 name: ${this.quoteYamlValue(skill.name)}
 description: ${this.quoteYamlValue(skill.description)}
@@ -210,6 +225,8 @@ ${skill.triggers.map((t) => `- User mentions "${t}"`).join("\n")}
 ## Patterns
 
 ${patterns}
+${antiPatterns}
+${references}
 
 ## Examples
 
@@ -219,6 +236,59 @@ ${examples}
 
 **${skill.category}** - ${this.getCategoryDescription(skill.category)}
 `;
+  }
+
+  private async generateDirectoryInstructions(analysis: AnalysisResult): Promise<string[]> {
+    const generated: string[] = [];
+    for (const instruction of buildDirectoryInstructions(analysis)) {
+      const directoryPath = path.resolve(this.rootPath, instruction.directory);
+      const relative = path.relative(this.rootPath, directoryPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+      const filePath = path.join(directoryPath, ".copilot-instructions.md");
+      if (!this.dryRun) {
+        await fs.mkdir(directoryPath, { recursive: true });
+        let content = instruction.content;
+        try {
+          content = mergeWithExisting(await fs.readFile(filePath, "utf-8"), instruction.content);
+        } catch {
+          // The file does not exist yet.
+        }
+        await fs.writeFile(filePath, content, "utf-8");
+      }
+      generated.push(path.posix.join(instruction.directory.replace(/\\/g, "/"), ".copilot-instructions.md"));
+    }
+    return generated;
+  }
+
+  private async generateFreshness(analysis: AnalysisResult): Promise<string> {
+    const relativePath = ".github/copilot/freshness.json";
+    if (!this.dryRun) {
+      const copilotDir = path.join(this.rootPath, ".github", "copilot");
+      await fs.mkdir(copilotDir, { recursive: true });
+      const skills = Object.fromEntries(analysis.skills.map((skill) => [
+        skill.name,
+        {
+          sourceDir: skill.sourceDir,
+          fingerprint: crypto.createHash("sha256")
+            .update(JSON.stringify({
+              patterns: skill.patterns,
+              references: skill.codebaseReferences ?? [],
+            }))
+            .digest("hex"),
+        },
+      ]));
+      await fs.writeFile(
+        path.join(copilotDir, "freshness.json"),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          generatedAt: new Date().toISOString(),
+          repoName: analysis.repoName,
+          skills,
+        }, null, 2)}\n`,
+        "utf-8",
+      );
+    }
+    return relativePath;
   }
 
   /**

@@ -20,6 +20,7 @@ import {
   parseAnalysisResponse,
   generateDefaultSkills,
 } from "./core.js";
+import { analyzeCLIStructure, generateCLISkills, mergeCLISkills } from "./cli.js";
 
 export class Analyzer {
   private verbose: boolean;
@@ -30,6 +31,7 @@ export class Analyzer {
   }
 
   async analyze(scanResult: ScanResult): Promise<AnalysisResult> {
+    const cli = await analyzeCLIStructure(scanResult);
     // Initialize Copilot SDK
     if (this.verbose) {
       console.log("  [SDK] Initializing CopilotClient...");
@@ -49,7 +51,7 @@ export class Analyzer {
       console.error("  [SDK] Failed to start client:", (error as Error).message);
       console.error("  [SDK] Make sure Copilot CLI is installed and in PATH");
       console.error("  [SDK] Falling back to heuristic analysis...\n");
-      return this.generateFallbackAnalysis(scanResult);
+      return this.generateFallbackAnalysis(scanResult, cli);
     }
 
     if (this.verbose) {
@@ -157,14 +159,14 @@ export class Analyzer {
       }
 
       // Parse the response
-      const result = this.buildResult(responseContent, scanResult);
+      const result = this.buildResult(responseContent, scanResult, cli);
 
       await session.destroy();
       return result;
     } catch (error) {
       console.error(`\n  [SDK] Error: ${(error as Error).message}`);
       console.error("  [SDK] Falling back to heuristic analysis...\n");
-      return this.generateFallbackAnalysis(scanResult);
+      return this.generateFallbackAnalysis(scanResult, cli);
     } finally {
       if (this.client) {
         try {
@@ -210,33 +212,47 @@ export class Analyzer {
     return samples;
   }
 
-  private buildResult(response: string, scanResult: ScanResult): AnalysisResult {
+  private buildResult(
+    response: string,
+    scanResult: ScanResult,
+    cli?: AnalysisResult["cli"],
+  ): AnalysisResult {
     const parsed = parseAnalysisResponse(response, () => null);
 
     if (parsed === null) {
-      return this.generateFallbackAnalysis(scanResult);
+      return this.generateFallbackAnalysis(scanResult, cli);
     }
 
     const flatAgents = flattenAgents(parsed.agents);
 
     return {
       repoName: path.basename(scanResult.rootPath),
-      skills: parsed.skills as SkillDefinition[],
+      skills: mergeCLISkills(
+        parsed.skills as SkillDefinition[],
+        cli ? generateCLISkills(cli) : [],
+      ),
       agents: flatAgents,
       tools: extractAllTools(flatAgents),
       hooks: parsed.hooks.length > 0
         ? (parsed.hooks as AnalysisResult["hooks"])
         : generateDefaultHooks(scanResult.language, scanResult.testFiles.length > 0),
       summary: parsed.summary,
+      cli,
     };
   }
 
-  private generateFallbackAnalysis(scanResult: ScanResult): AnalysisResult {
+  private generateFallbackAnalysis(
+    scanResult: ScanResult,
+    cli?: AnalysisResult["cli"],
+  ): AnalysisResult {
     // Detect domains for hierarchical agent structure
     const domains = detectDomainBoundaries(scanResult.files, path.sep);
 
     // Generate basic skills based on detected directories
-    const skills: SkillDefinition[] = generateDefaultSkills(scanResult.sourceDirectories);
+    const skills: SkillDefinition[] = mergeCLISkills(
+      generateDefaultSkills(scanResult.sourceDirectories),
+      cli ? generateCLISkills(cli) : [],
+    );
 
     // Generate tools from config
     const tools: ToolDefinition[] = detectToolsFromConfig(scanResult.language, scanResult.configFiles);
@@ -288,6 +304,7 @@ export class Analyzer {
       tools,
       hooks,
       summary: `A ${scanResult.language} repository${scanResult.framework ? ` using ${scanResult.framework}` : ""} with ${domains.length} detected domains.`,
+      cli,
     };
   }
 }

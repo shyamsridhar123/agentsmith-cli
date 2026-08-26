@@ -1,6 +1,6 @@
 {
   "name": "agentsmith-cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Turn any GitHub repo into a multi-agent AI system for VS Code Copilot. Generates orchestrators, sub-agents, skills, handoffs, and copilot-instructions.md.",
   "type": "module",
   "main": "dist/main.js",
@@ -53,20 +53,20 @@
     "url": "https://github.com/shyamsridhar123/agentsmith-cli/issues"
   },
   "dependencies": {
-    "@github/copilot-sdk": "^0.1.33-preview.2",
+    "@github/copilot-sdk": "^1.0.11",
     "chalk": "^5.3.0",
     "commander": "^12.0.0",
     "glob": "^10.3.0",
-    "simple-git": "^3.30.0",
-    "tsx": "^4.7.0",
-    "yaml": "^2.8.2",
+    "simple-git": "^3.36.0",
+    "yaml": "^2.9.0",
     "zod": "^3.22.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^20.19.43",
     "tsup": "^8.0.0",
+    "tsx": "^4.23.12",
     "typescript": "^5.3.0",
-    "vitest": "^1.2.0"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=18.0.0"
