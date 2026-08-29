@@ -3,9 +3,23 @@
  * Enumerates repository structure, detects language/framework, finds config files.
  */
 
-import fs from "fs/promises";
 import path from "path";
 import { glob } from "glob";
+import {
+  CLI_METADATA_FILES,
+  detectCLIFrameworkAndEntrypoints,
+  selectCLIImplementationFiles,
+} from "./cli.js";
+import {
+  isGeneratedRepositoryPath,
+  isSensitiveRepositoryPath,
+  isTestOrFixturePath,
+  readSafeRepositoryFile,
+  resolveSafeRepositoryFile,
+} from "./paths.js";
+
+export * from "./cli.js";
+export * from "./paths.js";
 
 export interface ScanResult {
   rootPath: string;
@@ -39,7 +53,13 @@ const IGNORE_PATTERNS = [
   "**/__pycache__/**",
   "**/.venv/**",
   "**/venv/**",
-  "**/.env",
+  "**/vendor/**",
+  "**/generated/**",
+  "**/__generated__/**",
+  "**/.env*",
+  "**/.npmrc",
+  "**/.pypirc",
+  "**/.netrc",
   "**/*.lock",
   "**/package-lock.json",
   "**/yarn.lock",
@@ -52,6 +72,7 @@ const CONFIG_PATTERNS = [
   "tsconfig.json",
   "pyproject.toml",
   "setup.py",
+  "requirements.txt",
   "go.mod",
   "Cargo.toml",
   ".eslintrc*",
@@ -60,6 +81,10 @@ const CONFIG_PATTERNS = [
   "Dockerfile",
   ".github/workflows/*.yml",
 ];
+
+const CLI_METADATA_READ_LIMIT = 512 * 1024;
+const CLI_SOURCE_READ_LIMIT = 256 * 1024;
+const CLI_TOTAL_READ_LIMIT = 8 * 1024 * 1024;
 
 export class Scanner {
   private rootPath: string;
@@ -82,20 +107,22 @@ export class Scanner {
     // Build file info
     const files: FileInfo[] = [];
     for (const relativePath of allFiles) {
-      const fullPath = path.join(this.rootPath, relativePath);
-      try {
-        const stat = await fs.stat(fullPath);
-        files.push({
-          path: fullPath,
-          relativePath,
-          extension: path.extname(relativePath),
-          size: stat.size,
-          isTest: this.isTestFile(relativePath),
-          isConfig: this.isConfigFile(relativePath),
-        });
-      } catch {
-        // Skip files we can't stat
+      if (
+        isSensitiveRepositoryPath(relativePath) ||
+        isGeneratedRepositoryPath(relativePath)
+      ) {
+        continue;
       }
+      const safeFile = await resolveSafeRepositoryFile(this.rootPath, relativePath);
+      if (!safeFile) continue;
+      files.push({
+        path: safeFile.path,
+        relativePath,
+        extension: path.extname(relativePath),
+        size: safeFile.size,
+        isTest: this.isTestFile(relativePath),
+        isConfig: this.isConfigFile(relativePath),
+      });
     }
 
     // Detect language
@@ -128,73 +155,44 @@ export class Scanner {
   }
 
   private async detectCLI(files: FileInfo[]): Promise<{ framework: string | null; entryFiles: string[] }> {
-    const normalizedPaths = files.map((file) => file.relativePath.replace(/\\/g, "/"));
-    const entryFiles = new Set<string>();
-    let framework: string | null = null;
-
-    const readConfig = async (fileName: string): Promise<string> => {
-      const match = files.find((file) => file.relativePath.replace(/\\/g, "/") === fileName);
-      if (!match) return "";
-      try {
-        return await fs.readFile(match.path, "utf-8");
-      } catch {
-        return "";
-      }
-    };
-
-    const packageJson = await readConfig("package.json");
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson) as {
-          dependencies?: Record<string, string>;
-          devDependencies?: Record<string, string>;
-          bin?: string | Record<string, string>;
-        };
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        framework = ["commander", "yargs", "oclif"]
-          .find((candidate) => candidate in deps) ?? null;
-        if (typeof pkg.bin === "string") entryFiles.add(pkg.bin.replace(/^\.\//, ""));
-        if (pkg.bin && typeof pkg.bin === "object") {
-          Object.values(pkg.bin).forEach((entry) => entryFiles.add(entry.replace(/^\.\//, "")));
-        }
-      } catch {
-        // Invalid package metadata is handled by the analyzer fallback.
+    const contents = new Map<string, string>();
+    const availablePaths = new Set(files.map((file) => file.relativePath.replace(/\\/g, "/")));
+    let remainingBytes = CLI_TOTAL_READ_LIMIT;
+    for (const metadataPath of CLI_METADATA_FILES) {
+      if (!availablePaths.has(metadataPath) || remainingBytes <= 0) continue;
+      const content = await readSafeRepositoryFile(
+        this.rootPath,
+        metadataPath,
+        Math.min(CLI_METADATA_READ_LIMIT, remainingBytes),
+      );
+      if (content !== undefined) {
+        contents.set(metadataPath, content);
+        remainingBytes -= Buffer.byteLength(content);
       }
     }
 
-    const goMod = await readConfig("go.mod");
-    if (!framework && goMod.includes("github.com/spf13/cobra")) framework = "cobra";
-
-    const pythonMetadata = [
-      await readConfig("pyproject.toml"),
-      await readConfig("requirements.txt"),
-      await readConfig("setup.py"),
-    ].join("\n").toLowerCase();
-    if (!framework) {
-      if (/\btyper\b/.test(pythonMetadata)) framework = "typer";
-      else if (/\bclick\b/.test(pythonMetadata)) framework = "click";
-      else if (normalizedPaths.some((file) => file.endsWith(".py"))) {
-        const pythonEntries = normalizedPaths.filter((file) =>
-          file.endsWith("/__main__.py") || file === "__main__.py" || file.endsWith("/cli.py"),
-        );
-        if (pythonEntries.length > 0) framework = "argparse";
+    const preliminary = detectCLIFrameworkAndEntrypoints(
+      availablePaths,
+      contents,
+    );
+    const implementationPaths = selectCLIImplementationFiles(
+      availablePaths,
+      preliminary.entryFiles,
+    );
+    for (const implementationPath of implementationPaths.slice(0, 100)) {
+      if (remainingBytes <= 0) break;
+      const content = await readSafeRepositoryFile(
+        this.rootPath,
+        implementationPath,
+        Math.min(CLI_SOURCE_READ_LIMIT, remainingBytes),
+      );
+      if (content !== undefined) {
+        contents.set(implementationPath, content);
+        remainingBytes -= Buffer.byteLength(content);
       }
     }
 
-    for (const file of normalizedPaths) {
-      if (
-        /(^|\/)(cli|main|index)\.(ts|tsx|js|jsx|py|go)$/.test(file) ||
-        /(^|\/)cmd\/[^/]+\/main\.go$/.test(file)
-      ) {
-        entryFiles.add(file);
-      }
-    }
-
-    if (!framework && normalizedPaths.some((file) => /(^|\/)(commands|cmd)\//.test(file))) {
-      framework = "convention-based";
-    }
-
-    return { framework, entryFiles: Array.from(entryFiles).sort() };
+    return detectCLIFrameworkAndEntrypoints(availablePaths, contents);
   }
 
   private detectLanguage(files: FileInfo[]): string {
@@ -247,7 +245,8 @@ export class Scanner {
     // Check package.json for dependencies
     if (hasFile("package.json")) {
       try {
-        const content = await fs.readFile(path.join(this.rootPath, "package.json"), "utf-8");
+        const content = await readSafeRepositoryFile(this.rootPath, "package.json");
+        if (content === undefined) return null;
         const pkg = JSON.parse(content);
         const deps = { ...pkg.dependencies, ...pkg.devDependencies };
 
@@ -270,7 +269,11 @@ export class Scanner {
         : null;
       if (reqPath) {
         try {
-          const content = await fs.readFile(reqPath, "utf-8");
+          const content = await readSafeRepositoryFile(
+            this.rootPath,
+            path.relative(this.rootPath, reqPath),
+          );
+          if (content === undefined) return null;
           if (content.includes("django")) return "Django";
           if (content.includes("flask")) return "Flask";
           if (content.includes("fastapi")) return "FastAPI";
@@ -283,7 +286,8 @@ export class Scanner {
     // Go frameworks
     if (hasFile("go.mod")) {
       try {
-        const content = await fs.readFile(path.join(this.rootPath, "go.mod"), "utf-8");
+        const content = await readSafeRepositoryFile(this.rootPath, "go.mod");
+        if (content === undefined) return null;
         if (content.includes("gin-gonic")) return "Gin";
         if (content.includes("echo")) return "Echo";
         if (content.includes("fiber")) return "Fiber";
@@ -296,18 +300,7 @@ export class Scanner {
   }
 
   private isTestFile(relativePath: string): boolean {
-    const lower = relativePath.toLowerCase();
-    // Normalize path separators for cross-platform compatibility  
-    const normalized = lower.replace(/\\/g, "/");
-    return (
-      normalized.includes(".test.") ||
-      normalized.includes(".spec.") ||
-      normalized.includes("_test.") ||
-      normalized.includes("test_") ||
-      normalized.startsWith("tests/") ||
-      normalized.startsWith("test/") ||
-      normalized.startsWith("__tests__/")
-    );
+    return isTestOrFixturePath(relativePath);
   }
 
   private isConfigFile(relativePath: string): boolean {

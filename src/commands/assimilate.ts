@@ -4,18 +4,29 @@
  */
 
 import chalk from "chalk";
-import fs from "fs/promises";
-import path from "node:path";
-import { Scanner } from "../scanner/index.js";
-import { Analyzer, RemoteAnalyzer } from "../analyzer/index.js";
+import {
+  createRepositorySnapshot,
+  normalizeRepositoryPath,
+  Scanner,
+} from "../scanner/index.js";
+import type {
+  RepositorySnapshot,
+  ScanResult,
+} from "../scanner/index.js";
+import {
+  Analyzer,
+  createLocalAnalysisSnapshot,
+  RemoteAnalyzer,
+} from "../analyzer/index.js";
 import { Generator } from "../generator/index.js";
 import { Registry } from "../registry/index.js";
 import { HookRunner } from "../hooks/index.js";
 import { isGitHubUrl, getRepoName } from "../utils/git.js";
 import { isPermissiveLicense } from "../utils/license.js";
+import { GitHubClient } from "../github/index.js";
 import type { AnalysisResult } from "../analyzer/index.js";
 import { FileCache, stableCacheKey } from "../cache/index.js";
-import { loadConfig } from "../config/index.js";
+import { loadConfig, validateOutputPath } from "../config/index.js";
 import {
   HubClient,
   normalizeHubServerUrl,
@@ -24,6 +35,7 @@ import {
   ensureCoordinationChannels,
   postRunSummary,
   recordRun,
+  snapshotRunFiles,
 } from "../hub/recorder.js";
 import { buildChannelNames } from "../generator/hub-writer.js";
 
@@ -36,6 +48,7 @@ export interface AssimilateOptions {
   hub?: string;
   record?: boolean;
   cache?: boolean;
+  runHooks?: boolean;
 }
 
 export async function assimilateCommand(
@@ -67,10 +80,36 @@ export async function assimilateCommand(
   const isRemote = isGitHubUrl(target);
 
   if (isRemote) {
-    // Use new remote analyzer - no cloning!
+    console.log(chalk.green("\n[LICENSE]"), "Checking repository license...");
+    const github = new GitHubClient(target, options.verbose);
+    const mutableRepoInfo = await github.getRepoInfo();
+    const revision = await github.resolveRevision(mutableRepoInfo.defaultBranch);
+    const license = await github.getLicense(revision);
+    const repoInfo = { ...mutableRepoInfo, license };
+    const isPermissive = isPermissiveLicense(license);
+
+    if (!isPermissive) {
+      console.log(chalk.red("\n[BLOCKED]"), "Cannot assimilate repository.");
+      if (!license) {
+        console.log(chalk.red("  No license detected."));
+      } else {
+        console.log(chalk.red(`  License "${license}" is not permissive.`));
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(chalk.green(`  ✓ ${license} - permissive license`));
+
+    // Use the remote analyzer only after the license boundary has been checked.
     console.log(chalk.green("\n[ANALYZE]"), `Analyzing ${getRepoName(target)} via GitHub API...`);
-    
-    const analyzer = new RemoteAnalyzer(target, options.verbose);
+
+    const analyzer = new RemoteAnalyzer(
+      target,
+      options.verbose,
+      revision,
+      repoInfo,
+    );
     const result = await analyzer.analyze();
 
     if (options.verbose) {
@@ -80,32 +119,12 @@ export async function assimilateCommand(
       console.log(chalk.gray(`  └── Skills: ${result.skills.length}`));
     }
 
-    // License check
-    console.log(chalk.green("\n[LICENSE]"), "Checking repository license...");
-    const isPermissive = isPermissiveLicense(result.repo?.license);
-
-    if (!isPermissive && !options.dryRun) {
-      console.log(chalk.red("\n[BLOCKED]"), "Cannot assimilate repository.");
-      if (!result.repo?.license) {
-        console.log(chalk.red("  No license detected."));
-      } else {
-        console.log(chalk.red(`  License "${result.repo.license}" is not permissive.`));
-      }
-      console.log(chalk.gray("  Use --dry-run to preview without restrictions."));
-      process.exitCode = 1;
-      return;
-    }
-
-    if (isPermissive) {
-      console.log(chalk.green(`  ✓ ${result.repo?.license} - permissive license`));
-    } else if (options.dryRun) {
-      console.log(chalk.yellow("  ⚠ License not permissive - generation blocked without --dry-run"));
-    }
-
-    // Output path
-    const outputPath = options.output || process.cwd();
     const hubClient = await prepareHub(result.repoName, options);
     const activeHubUrl = options.dryRun ? options.hub : hubClient?.getServerUrl();
+    const outputPath = await validateOutputPath(
+      process.cwd(),
+      options.output ?? process.cwd(),
+    );
 
     console.log(
       chalk.green("\n[GENERATE]"),
@@ -127,14 +146,17 @@ export async function assimilateCommand(
 
     // Registry
     const registry = new Registry(outputPath, options.dryRun);
-    await registry.build(result.skills, result.agents);
+    await registry.build(result.skills, result.agents, generated);
     const registryIcon = options.dryRun ? chalk.yellow("○") : chalk.green("✓");
     console.log(`  ${registryIcon} skills-registry.jsonl`);
 
     // Hooks
-    if (!options.dryRun) {
-      const hookRunner = new HookRunner(outputPath, options.verbose);
-      await hookRunner.execute("post-generate");
+    if (!options.dryRun && options.runHooks) {
+      const hookRunner = new HookRunner(outputPath, {
+        verbose: options.verbose,
+        allowExecution: true,
+      });
+      await hookRunner.executeDefinitions("post-generate", result.hooks);
     }
 
     // Hub recording (opt-in)
@@ -143,7 +165,7 @@ export async function assimilateCommand(
     }
 
     // Summary
-    const agentCount = generated.files.filter(f => f.endsWith(".agent.md")).length;
+    const agentCount = generated.agentFiles.length;
     console.log(
       chalk.green("\n[COMPLETE]"),
       `${result.skills.length} skills, ${agentCount} agent(s), ${result.hooks.length} hooks generated.`
@@ -171,6 +193,26 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
   const resolved = await resolveInput(target);
 
   try {
+    console.log(chalk.green("\n[LICENSE]"), "Checking repository license...");
+    const license = await detectLicense(resolved.path);
+
+    if (options.verbose) {
+      console.log(chalk.gray(`  └── ${formatLicenseStatus(license)}`));
+    }
+
+    if (!license.permissive) {
+      console.log(chalk.red("\n[BLOCKED]"), "Cannot assimilate repository.");
+      if (!license.detected) {
+        console.log(chalk.red("  No license file found."));
+      } else {
+        console.log(chalk.red(`  License "${license.name}" is not permissive.`));
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(chalk.green(`  ✓ ${license.name} - permissive license`));
+
     console.log(chalk.green("\n[SCAN]"), "Enumerating repository...");
 
     const scanner = new Scanner(resolved.path, options.verbose);
@@ -191,23 +233,42 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
     }
 
     console.log(chalk.green("\n[ANALYZE]"), "Copilot SDK analysis in progress...");
+    const repositorySnapshot = await createLocalAnalysisSnapshot(
+      scanResult,
+      config.cache,
+    );
 
-    const cache = new FileCache();
-    const cacheKey = stableCacheKey({
-      schema: 1,
-      root: resolved.path,
-      files: scanResult.files.map((file) => [file.relativePath, file.size]),
-      cliFramework: scanResult.cliFramework,
-    });
     let analysisResult: AnalysisResult | undefined;
     if (config.cache) {
-      analysisResult = await cache.get<AnalysisResult>(cacheKey, config.cacheTtlSeconds);
-      if (analysisResult && config.verbose) console.log(chalk.gray("  └── Using cached analysis"));
+      const cache = new FileCache();
+      const snapshotKey = await buildAnalysisCacheKey(
+        scanResult,
+        repositorySnapshot,
+      );
+      analysisResult = await cache.get<AnalysisResult>(
+        snapshotKey,
+        config.cacheTtlSeconds,
+      );
+      if (analysisResult) {
+        if (config.verbose) {
+          console.log(chalk.gray("  └── Using cached analysis"));
+        }
+      }
+      if (!analysisResult) {
+        const analyzer = new Analyzer(config.verbose);
+        analysisResult = await analyzer.analyze(
+          scanResult,
+          repositorySnapshot,
+        );
+        await cache.set(snapshotKey, analysisResult);
+      }
     }
     if (!analysisResult) {
       const analyzer = new Analyzer(config.verbose);
-      analysisResult = await analyzer.analyze(scanResult);
-      if (config.cache) await cache.set(cacheKey, analysisResult);
+      analysisResult = await analyzer.analyze(
+        scanResult,
+        repositorySnapshot,
+      );
     }
 
     if (options.verbose) {
@@ -216,34 +277,13 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       }
     }
 
-    // License check
-    console.log(chalk.green("\n[LICENSE]"), "Checking repository license...");
-    const license = await detectLicense(resolved.path);
-    
-    if (options.verbose) {
-      console.log(chalk.gray(`  └── ${formatLicenseStatus(license)}`));
-    }
-
-    if (!license.permissive && !options.dryRun) {
-      console.log(chalk.red("\n[BLOCKED]"), "Cannot assimilate repository.");
-      if (!license.detected) {
-        console.log(chalk.red("  No license file found."));
-      } else {
-        console.log(chalk.red(`  License "${license.name}" is not permissive.`));
-      }
-      process.exitCode = 1;
-      return;
-    }
-
-    if (license.permissive) {
-      console.log(chalk.green(`  ✓ ${license.name} - permissive license`));
-    }
-
-    const outputPath = config.output
-      ? path.resolve(resolved.path, config.output)
-      : resolved.path;
     const hubClient = await prepareHub(analysisResult.repoName, options);
     const activeHubUrl = options.dryRun ? options.hub : hubClient?.getServerUrl();
+    const outputPath = await validateOutputPath(
+      resolved.path,
+      config.output ?? resolved.path,
+      config.outputSource === "project",
+    );
 
     console.log(
       chalk.green("\n[GENERATE]"),
@@ -263,12 +303,18 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
     }
 
     const registry = new Registry(outputPath, options.dryRun);
-    await registry.build(analysisResult.skills, analysisResult.agents);
+    await registry.build(analysisResult.skills, analysisResult.agents, generated);
     console.log(`  ${options.dryRun ? chalk.yellow("○") : chalk.green("✓")} skills-registry.jsonl`);
 
-    if (!options.dryRun) {
-      const hookRunner = new HookRunner(outputPath, options.verbose);
-      await hookRunner.execute("post-generate");
+    if (!options.dryRun && options.runHooks) {
+      const hookRunner = new HookRunner(outputPath, {
+        verbose: options.verbose,
+        allowExecution: true,
+      });
+      await hookRunner.executeDefinitions(
+        "post-generate",
+        analysisResult.hooks,
+      );
     }
 
     // Hub recording (opt-in)
@@ -282,7 +328,7 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       );
     }
 
-    const localAgentCount = generated.files.filter(f => f.endsWith(".agent.md")).length;
+    const localAgentCount = generated.agentFiles.length;
     console.log(
       chalk.green("\n[COMPLETE]"),
       `${analysisResult.skills.length} skills, ${localAgentCount} agent(s), ${analysisResult.hooks.length} hooks generated.`
@@ -341,6 +387,59 @@ export async function prepareHub(
   }
 }
 
+export async function buildAnalysisCacheKey(
+  scanResult: ScanResult,
+  repositorySnapshot?: RepositorySnapshot,
+): Promise<string> {
+  const snapshot = repositorySnapshot ?? await createRepositorySnapshot(
+    scanResult.rootPath,
+    scanResult.files.map((file) => file.relativePath),
+    { computeDigests: true },
+  );
+  const files: Array<[string, string]> = [];
+  for (const [relativePath, file] of snapshot.files) {
+    if (!file.digest) {
+      throw new Error(
+        `Cannot build analysis cache key without a digest for ${relativePath}`,
+      );
+    }
+    files.push([
+      relativePath,
+      file.digest,
+    ]);
+  }
+  files.sort(([left], [right]) => left.localeCompare(right));
+  const snapshotPaths = new Set(files.map(([relativePath]) => relativePath));
+  const analyzedFiles = scanResult.files
+    .map((file) => ({
+      relativePath: normalizeRepositoryPath(file.relativePath),
+      extension: file.extension,
+      isTest: file.isTest,
+      isConfig: file.isConfig,
+    }))
+    .filter((file) => snapshotPaths.has(file.relativePath));
+
+  return stableCacheKey({
+    schema: 4,
+    root: snapshot.rootPath,
+    files,
+    analyzedFiles,
+    language: scanResult.language,
+    framework: scanResult.framework,
+    configFiles: scanResult.configFiles
+      .map(normalizeRepositoryPath)
+      .filter((file) => snapshotPaths.has(file)),
+    testFiles: scanResult.testFiles
+      .map(normalizeRepositoryPath)
+      .filter((file) => snapshotPaths.has(file)),
+    sourceDirectories: scanResult.sourceDirectories,
+    cliFramework: scanResult.cliFramework,
+    cliEntryFiles: scanResult.cliEntryFiles
+      .map(normalizeRepositoryPath)
+      .filter((file) => snapshotPaths.has(file)),
+  });
+}
+
 /**
  * Record an assimilation run to AgentHub (opt-in via --hub --record).
  * Failures are logged and never block the pipeline.
@@ -355,35 +454,15 @@ export async function recordToHub(
   try {
     console.log(chalk.green("\n[HUB]"), "Recording run to AgentHub...");
 
-    const fileContents = new Map<string, string>();
-    for (const filePath of new Set(generatedFilePaths)) {
-      const fullPath = path.resolve(outputPath, filePath);
-      const relativePath = path.relative(outputPath, fullPath);
-      if (
-        relativePath === ".." ||
-        relativePath.startsWith(`..${path.sep}`) ||
-        path.isAbsolute(relativePath)
-      ) {
-        throw new Error(`Refusing to record file outside output path: ${filePath}`);
-      }
-      const content = await fs.readFile(fullPath, "utf-8");
-      fileContents.set(filePath, content);
-    }
-    const registryPath = path.resolve(outputPath, "skills-registry.jsonl");
-    try {
-      fileContents.set(
-        "skills-registry.jsonl",
-        await fs.readFile(registryPath, "utf-8"),
-      );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const snapshot = await snapshotRunFiles(outputPath, generatedFilePaths);
+    if (snapshot.registryMissing) {
       console.log(
         chalk.yellow("  ⚠"),
         "skills-registry.jsonl was not found; recording generated assets without it",
       );
     }
 
-    const result = await recordRun(analysis, fileContents, client);
+    const result = await recordRun(analysis, snapshot.files, client);
 
     if (result.success) {
       console.log(chalk.green("  ✓"), `Run recorded (commit: ${result.commitHash?.slice(0, 8)})`);

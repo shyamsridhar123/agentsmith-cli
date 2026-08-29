@@ -4,25 +4,67 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import yaml from "yaml";
+
+const pathSafetyMocks = vi.hoisted(() => ({
+  atomicWriteContainedFile: vi.fn(),
+  createContainedRoot: vi.fn(),
+  ensureContainedDirectory: vi.fn(),
+  readContainedFile: vi.fn(),
+  removeContainedExistingFile: vi.fn(),
+  resolveContainedExistingFile: vi.fn(),
+}));
 
 vi.mock("fs/promises", () => ({
   default: {
+    lstat: vi.fn(),
     mkdir: vi.fn(),
+    readFile: vi.fn(),
+    realpath: vi.fn(),
+    stat: vi.fn(),
     writeFile: vi.fn(),
   },
 }));
+
+vi.mock("../src/generator/path-safety.js", () => pathSafetyMocks);
 
 import fs from "fs/promises";
 import { Generator } from "../src/generator/index.js";
 import type { AnalysisResult, SkillDefinition, AgentDefinition, HookDefinition } from "../src/analyzer/types.js";
 
 const mockMkdir = vi.mocked(fs.mkdir);
+const mockLstat = vi.mocked(fs.lstat);
+const mockReadFile = vi.mocked(fs.readFile);
+const mockRealpath = vi.mocked(fs.realpath);
+const mockStat = vi.mocked(fs.stat);
 const mockWriteFile = vi.mocked(fs.writeFile);
 
 beforeEach(() => {
   vi.resetAllMocks();
   mockMkdir.mockResolvedValue(undefined);
+  mockLstat.mockRejectedValue(Object.assign(new Error("missing"), { code: "ENOENT" }));
+  mockReadFile.mockRejectedValue(Object.assign(new Error("missing"), { code: "ENOENT" }));
+  mockRealpath.mockImplementation(async (target) => target as string);
+  mockStat.mockResolvedValue({ isDirectory: () => true, isFile: () => true } as any);
   mockWriteFile.mockResolvedValue(undefined);
+  pathSafetyMocks.createContainedRoot.mockImplementation(async (target: string) => ({
+    requestedRoot: target,
+    realRoot: target,
+  }));
+  pathSafetyMocks.ensureContainedDirectory.mockImplementation(async (_root, target: string) => target);
+  pathSafetyMocks.readContainedFile.mockRejectedValue(
+    Object.assign(new Error("missing"), { code: "ENOENT" }),
+  );
+  pathSafetyMocks.resolveContainedExistingFile.mockRejectedValue(
+    Object.assign(new Error("missing"), { code: "ENOENT" }),
+  );
+  pathSafetyMocks.atomicWriteContainedFile.mockImplementation(
+    async (_root, target: string, content: string) => {
+      await fs.writeFile(target, content, "utf-8");
+      return target;
+    },
+  );
+  pathSafetyMocks.removeContainedExistingFile.mockResolvedValue(undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -149,6 +191,7 @@ describe("Generator — SKILL.md generation", () => {
       "Unsafe skill name",
     );
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -296,8 +339,9 @@ describe("Generator — agent.md generation", () => {
     const gen = new Generator("/project");
     const result = await gen.generate(analysis);
 
-    expect(result.files.some((f) => f.includes("my-cool-project-.agent.md"))).toBe(true);
+    expect(result.files.some((f) => f.includes("my-cool-project.agent.md"))).toBe(true);
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -305,6 +349,17 @@ describe("Generator — agent.md generation", () => {
 // ---------------------------------------------------------------------------
 
 describe("Generator — hook YAML generation", () => {
+  it.each(["../escaped", "nested/hook", "CON", "trailing."])(
+    "rejects unsafe hook filename %s",
+    async (name) => {
+      const analysis = makeAnalysis({ hooks: [makeHook({ name })] });
+      await expect(new Generator("/project").generate(analysis)).rejects.toThrow(
+        "Unsafe hook name",
+      );
+      expect(mockWriteFile).not.toHaveBeenCalled();
+    },
+  );
+
   it("generates hook YAML with commands", async () => {
     const hook = makeHook();
     const analysis = makeAnalysis({ hooks: [hook] });
@@ -318,10 +373,12 @@ describe("Generator — hook YAML generation", () => {
       (c) => (c[0] as string).includes("pre-commit-quality.yaml"),
     );
     const content = writeCall![1] as string;
-    expect(content).toContain("name: pre-commit-quality");
-    expect(content).toContain("event: pre-commit");
-    expect(content).toContain('"npm run lint"');
-    expect(content).toContain('"npm run build"');
+    expect(yaml.parse(content)).toEqual({
+      name: "pre-commit-quality",
+      event: "pre-commit",
+      description: "Run quality checks",
+      commands: ["npm run lint", "npm run build"],
+    });
   });
 
   it("includes condition when provided", async () => {
@@ -338,6 +395,7 @@ describe("Generator — hook YAML generation", () => {
     expect(content).toContain("condition:");
     expect(content).toContain("branch != main");
   });
+
 });
 
 // ---------------------------------------------------------------------------

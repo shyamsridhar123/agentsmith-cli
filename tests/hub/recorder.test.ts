@@ -15,12 +15,25 @@ import {
   ensureCoordinationChannels,
   recordRun,
   postRunSummary,
+  snapshotRunFiles,
 } from "../../src/hub/recorder.js";
 import type { AnalysisResult } from "../../src/analyzer/types.js";
+import type { HubClient } from "../../src/hub/client.js";
 
 // Mock child_process
-const { execFileMock } = vi.hoisted(() => ({
+const { execFileMock, fsMocks } = vi.hoisted(() => ({
   execFileMock: vi.fn(),
+  fsMocks: {
+    mkdtemp: vi.fn(),
+    writeFile: vi.fn(),
+    rm: vi.fn(),
+    mkdir: vi.fn(),
+    readFile: vi.fn(),
+    open: vi.fn(),
+    realpath: vi.fn(),
+    stat: vi.fn(),
+    lstat: vi.fn(),
+  },
 }));
 
 vi.mock("node:child_process", () => ({
@@ -29,16 +42,17 @@ vi.mock("node:child_process", () => ({
 
 // Mock fs/promises
 vi.mock("node:fs/promises", () => ({
-  mkdtemp: vi.fn().mockResolvedValue("/tmp/agentsmith-record-abc123"),
-  writeFile: vi.fn().mockResolvedValue(undefined),
-  rm: vi.fn().mockResolvedValue(undefined),
-  mkdir: vi.fn().mockResolvedValue(undefined),
-  readFile: vi.fn().mockResolvedValue(Buffer.from("fake-bundle-data")),
+  ...fsMocks,
 }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   process.env.GIT_DIR = "caller-repository";
+  fsMocks.mkdtemp.mockResolvedValue("/tmp/agentsmith-record-abc123");
+  fsMocks.writeFile.mockResolvedValue(undefined);
+  fsMocks.rm.mockResolvedValue(undefined);
+  fsMocks.mkdir.mockResolvedValue(undefined);
+  fsMocks.readFile.mockResolvedValue(Buffer.from("fake-bundle-data"));
   execFileMock.mockImplementation(
     (
       _cmd: string,
@@ -53,6 +67,139 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.GIT_DIR;
+});
+
+describe("snapshotRunFiles", () => {
+  it("reads immutable bytes from the validated open handle without reopening the path", async () => {
+    const fileStats = {
+      dev: 1,
+      ino: 2,
+      nlink: 1,
+      size: 6,
+      mtimeMs: 10,
+      ctimeMs: 10,
+      isFile: () => true,
+    };
+    const handle = {
+      stat: vi.fn().mockResolvedValue(fileStats),
+      readFile: vi.fn().mockResolvedValue(Buffer.from("inside")),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    fsMocks.realpath
+      .mockResolvedValueOnce("/output")
+      .mockResolvedValueOnce("/output/artifact.txt");
+    fsMocks.open
+      .mockResolvedValueOnce(handle)
+      .mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "ENOENT" }));
+    fsMocks.stat.mockResolvedValue(fileStats);
+    fsMocks.lstat.mockResolvedValue({
+      ...fileStats,
+      isSymbolicLink: () => false,
+    });
+
+    const snapshot = await snapshotRunFiles("/output", ["artifact.txt"]);
+
+    expect(Buffer.from(snapshot.files.get("artifact.txt")!)).toEqual(
+      Buffer.from("inside"),
+    );
+    expect(snapshot.registryMissing).toBe(true);
+    expect(handle.readFile).toHaveBeenCalledOnce();
+    expect(handle.close).toHaveBeenCalledOnce();
+    expect(fsMocks.readFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects a path whose identity differs from the opened file", async () => {
+    const openedStats = {
+      dev: 1,
+      ino: 2,
+      nlink: 1,
+      size: 6,
+      mtimeMs: 10,
+      ctimeMs: 10,
+      isFile: () => true,
+    };
+    const handle = {
+      stat: vi.fn().mockResolvedValue(openedStats),
+      readFile: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    fsMocks.realpath
+      .mockResolvedValueOnce("/output")
+      .mockResolvedValueOnce("/output/artifact.txt");
+    fsMocks.open.mockResolvedValue(handle);
+    fsMocks.stat.mockResolvedValue({ ...openedStats, ino: 3 });
+    fsMocks.lstat.mockResolvedValue({
+      ...openedStats,
+      isSymbolicLink: () => false,
+    });
+
+    await expect(snapshotRunFiles("/output", ["artifact.txt"]))
+      .rejects.toThrow("changed while opening");
+    expect(handle.readFile).not.toHaveBeenCalled();
+    expect(handle.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a hard-linked file using the opened handle stat", async () => {
+    const openedStats = {
+      dev: 1,
+      ino: 2,
+      nlink: 2,
+      size: 6,
+      mtimeMs: 10,
+      ctimeMs: 10,
+      isFile: () => true,
+    };
+    const handle = {
+      stat: vi.fn().mockResolvedValue(openedStats),
+      readFile: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    fsMocks.realpath.mockResolvedValueOnce("/output");
+    fsMocks.open.mockResolvedValue(handle);
+
+    await expect(snapshotRunFiles("/output", ["artifact.txt"]))
+      .rejects.toThrow("Refusing to record hard-linked file: artifact.txt");
+    expect(handle.readFile).not.toHaveBeenCalled();
+    expect(handle.close).toHaveBeenCalledOnce();
+    expect(fsMocks.lstat).not.toHaveBeenCalled();
+  });
+
+  it("rejects a hard link added while reading from the opened handle", async () => {
+    const beforeStats = {
+      dev: 1,
+      ino: 2,
+      nlink: 1,
+      size: 6,
+      mtimeMs: 10,
+      ctimeMs: 10,
+      isFile: () => true,
+    };
+    const afterStats = {
+      ...beforeStats,
+      nlink: 2,
+    };
+    const handle = {
+      stat: vi.fn()
+        .mockResolvedValueOnce(beforeStats)
+        .mockResolvedValueOnce(afterStats),
+      readFile: vi.fn().mockResolvedValue(Buffer.from("inside")),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    fsMocks.realpath
+      .mockResolvedValueOnce("/output")
+      .mockResolvedValueOnce("/output/artifact.txt");
+    fsMocks.open.mockResolvedValue(handle);
+    fsMocks.stat.mockResolvedValue(beforeStats);
+    fsMocks.lstat.mockResolvedValue({
+      ...beforeStats,
+      isSymbolicLink: () => false,
+    });
+
+    await expect(snapshotRunFiles("/output", ["artifact.txt"]))
+      .rejects.toThrow("Refusing to record hard-linked file: artifact.txt");
+    expect(handle.readFile).toHaveBeenCalledOnce();
+    expect(handle.close).toHaveBeenCalledOnce();
+  });
 });
 
 // --- Helpers ---
@@ -94,7 +241,7 @@ function makeMockClient() {
     createChannel: vi.fn().mockResolvedValue({ id: 1, name: "test" }),
     listChannels: vi.fn().mockResolvedValue([]),
     health: vi.fn().mockResolvedValue({ status: "ok" }),
-  } as any;
+  } as unknown as HubClient;
 }
 
 // --- Tests ---

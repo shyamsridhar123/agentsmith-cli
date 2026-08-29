@@ -1,13 +1,24 @@
 /**
- * Validate Command
- * "I'm going to enjoy watching you die, Mr. Anderson."
- * (Validates agent assets with ruthless precision)
+ * Validate generated Agent Smith assets and their references.
  */
 
-import fs from "fs/promises";
 import path from "path";
 import chalk from "chalk";
 import yaml from "yaml";
+import {
+  assertPortablePathComponents,
+  openContainedRoot,
+  readContainedDirectory,
+  readContainedFile,
+  resolveContainedExistingDirectory,
+  resolveContainedExistingFile,
+  type ContainedRoot,
+} from "../generator/path-safety.js";
+import {
+  canonicalizeRegistryAssetPath,
+  registryPathKey,
+  type RegistryAssetType,
+} from "../registry/asset-path.js";
 
 interface ValidationResult {
   valid: boolean;
@@ -19,43 +30,161 @@ interface ValidateOptions {
   verbose?: boolean;
 }
 
-export async function validateCommand(
-  targetPath: string = ".",
-  options: ValidateOptions = {}
-): Promise<void> {
-  const rootPath = path.resolve(targetPath);
-  const result: ValidationResult = { valid: true, errors: [], warnings: [] };
+function addError(result: ValidationResult, message: string): void {
+  result.errors.push(message);
+  result.valid = false;
+}
 
+function isContained(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === ""
+    || (!relative.startsWith(`..${path.sep}`)
+      && relative !== ".."
+      && !path.isAbsolute(relative));
+}
+
+async function openManagedDirectory(
+  root: ContainedRoot,
+  relativePath: string,
+  result: ValidationResult,
+  missingMessage: string,
+  required: boolean,
+): Promise<string | undefined> {
+  try {
+    return await resolveContainedExistingDirectory(
+      root,
+      path.join(root.requestedRoot, ...relativePath.split("/")),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (required) addError(result, missingMessage);
+      else result.warnings.push(missingMessage);
+    } else {
+      addError(result, `${relativePath}: ${(error as Error).message}`);
+    }
+    return undefined;
+  }
+}
+
+async function validateReferencedFile(
+  root: ContainedRoot,
+  reference: string,
+  result: ValidationResult,
+  label: string,
+  baseDirectory = root.requestedRoot,
+): Promise<void> {
+  const cleanReference = reference.trim().replace(/^<|>$/g, "").split(/[?#]/, 1)[0];
+  let decodedReference: string;
+  try {
+    decodedReference = decodeURIComponent(cleanReference);
+  } catch {
+    addError(result, `${label}: Invalid referenced path '${reference}'`);
+    return;
+  }
+  if (!decodedReference) return;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(decodedReference)) {
+    addError(result, `${label}: External referenced paths are not allowed: ${reference}`);
+    return;
+  }
+  try {
+    assertPortablePathComponents(decodedReference, "referenced path");
+  } catch (error) {
+    addError(result, `${label}: ${(error as Error).message}`);
+    return;
+  }
+
+  const absoluteTarget = path.resolve(baseDirectory, decodedReference);
+  if (!isContained(root.requestedRoot, absoluteTarget)) {
+    addError(result, `${label}: Referenced path escapes repository: ${reference}`);
+    return;
+  }
+  try {
+    await resolveContainedExistingFile(root, absoluteTarget);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      addError(result, `${label}: Missing referenced path: ${reference}`);
+    } else {
+      addError(
+        result,
+        `${label}: Unable to validate referenced path '${reference}': ${(error as Error).message}`,
+      );
+    }
+  }
+}
+
+async function validateMarkdownLinks(
+  root: ContainedRoot,
+  filePath: string,
+  content: string,
+  result: ValidationResult,
+): Promise<void> {
+  for (const match of content.matchAll(/\]\(([^)]+)\)/g)) {
+    const reference = match[1].trim().split(/\s+/, 1)[0];
+    const cleanReference = reference.replace(/^<|>$/g, "");
+    if (/^[a-z][a-z0-9+.-]*:/i.test(cleanReference)) {
+      addError(
+        result,
+        `${path.relative(root.requestedRoot, filePath)}: External referenced paths are not allowed: ${reference}`,
+      );
+      continue;
+    }
+    const pathOnly = cleanReference.split(/[?#]/, 1)[0].toLowerCase();
+    if (!pathOnly.endsWith("/skill.md") && !pathOnly.endsWith(".agent.md")) continue;
+    await validateReferencedFile(
+      root,
+      reference,
+      result,
+      path.relative(root.requestedRoot, filePath),
+      path.dirname(filePath),
+    );
+  }
+}
+
+function parseFrontmatter(
+  content: string,
+  label: string,
+  result: ValidationResult,
+): Record<string, unknown> | undefined {
+  if (!content.startsWith("---")) {
+    addError(result, `${label}: Missing YAML frontmatter`);
+    return undefined;
+  }
+  const frontmatterEnd = content.indexOf("---", 3);
+  if (frontmatterEnd === -1) {
+    addError(result, `${label}: Malformed YAML frontmatter`);
+    return undefined;
+  }
+  try {
+    const parsed = yaml.parse(content.slice(4, frontmatterEnd).trim());
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  } catch (error) {
+    addError(result, `${label}: Invalid YAML - ${(error as Error).message}`);
+    return undefined;
+  }
+}
+
+export async function validateCommand(
+  targetPath = ".",
+  options: ValidateOptions = {},
+): Promise<void> {
+  const result: ValidationResult = { valid: true, errors: [], warnings: [] };
+  const root = await openContainedRoot(path.resolve(targetPath));
   console.log(chalk.green("\n[VALIDATE]"), "Checking agent assets...\n");
 
-  // Validate skills
-  await validateSkills(rootPath, result, options.verbose);
+  await validateSkills(root, result, options.verbose);
+  await validateAgents(root, result, options.verbose);
+  await validateHooks(root, result, options.verbose);
+  await validateRegistry(root, result, options.verbose);
 
-  // Validate agents
-  await validateAgents(rootPath, result, options.verbose);
-
-  // Validate hooks
-  await validateHooks(rootPath, result, options.verbose);
-
-  // Validate registry
-  await validateRegistry(rootPath, result, options.verbose);
-
-  // Summary
   console.log("");
   if (result.errors.length > 0) {
     console.log(chalk.red(`\n✗ Validation failed with ${result.errors.length} error(s):`));
-    for (const error of result.errors) {
-      console.log(chalk.red(`  • ${error}`));
-    }
+    for (const error of result.errors) console.log(chalk.red(`  • ${error}`));
   }
-
   if (result.warnings.length > 0) {
     console.log(chalk.yellow(`\n⚠ ${result.warnings.length} warning(s):`));
-    for (const warning of result.warnings) {
-      console.log(chalk.yellow(`  • ${warning}`));
-    }
+    for (const warning of result.warnings) console.log(chalk.yellow(`  • ${warning}`));
   }
-
   if (result.valid) {
     console.log(chalk.green("\n✓ All agent assets are valid."));
   } else {
@@ -64,250 +193,212 @@ export async function validateCommand(
 }
 
 async function validateSkills(
-  rootPath: string,
+  root: ContainedRoot,
   result: ValidationResult,
-  verbose?: boolean
+  verbose?: boolean,
 ): Promise<void> {
-  const skillsDir = path.join(rootPath, ".github", "skills");
+  const skillsDir = await openManagedDirectory(
+    root,
+    ".github/skills",
+    result,
+    "No .github/skills/ directory found",
+    false,
+  );
+  if (!skillsDir) return;
 
-  try {
-    const entries = await fs.readdir(skillsDir, { withFileTypes: true });
-    const skillDirs = entries.filter((e) => e.isDirectory());
-
-    if (skillDirs.length === 0) {
-      result.warnings.push("No skills found in .github/skills/");
-      return;
-    }
-
-    for (const dir of skillDirs) {
-      const skillFile = path.join(skillsDir, dir.name, "SKILL.md");
-
-      try {
-        const content = await fs.readFile(skillFile, "utf-8");
-
-        // Check for required frontmatter
-        if (!content.startsWith("---")) {
-          result.errors.push(`${dir.name}/SKILL.md: Missing YAML frontmatter`);
-          result.valid = false;
-          continue;
-        }
-
-        // Extract and validate frontmatter
-        const frontmatterEnd = content.indexOf("---", 3);
-        if (frontmatterEnd === -1) {
-          result.errors.push(`${dir.name}/SKILL.md: Malformed YAML frontmatter`);
-          result.valid = false;
-          continue;
-        }
-
-        const frontmatter = content.slice(4, frontmatterEnd).trim();
-        const meta = yaml.parse(frontmatter);
-
-        if (!meta.name) {
-          result.errors.push(`${dir.name}/SKILL.md: Missing 'name' in frontmatter`);
-          result.valid = false;
-        }
-
-        if (!meta.description) {
-          result.warnings.push(`${dir.name}/SKILL.md: Missing 'description' in frontmatter`);
-        }
-
-        if (verbose) {
-          console.log(chalk.green(`  ✓ skills/${dir.name}/SKILL.md`));
-        }
-      } catch (e) {
-        const err = e as NodeJS.ErrnoException;
-        result.errors.push(`${dir.name}: ${err.code === "ENOENT" ? "Missing SKILL.md file" : err.message}`);
-        result.valid = false;
-      }
-    }
-
-    if (!verbose) {
-      console.log(chalk.gray(`  Validated ${skillDirs.length} skill(s)`));
-    }
-  } catch {
-    result.warnings.push("No .github/skills/ directory found");
+  const entries = await readContainedDirectory(root, skillsDir);
+  const skillDirs = entries.filter((entry) => entry.isDirectory() || entry.isSymbolicLink());
+  if (skillDirs.length === 0) {
+    result.warnings.push("No skills found in .github/skills/");
+    return;
   }
+
+  let validated = 0;
+  for (const entry of skillDirs) {
+    const label = `${entry.name}/SKILL.md`;
+    try {
+      assertPortablePathComponents(entry.name, "skill path");
+      const skillDir = await resolveContainedExistingDirectory(root, path.join(skillsDir, entry.name));
+      const skillFile = await resolveContainedExistingFile(root, path.join(skillDir, "SKILL.md"));
+      const content = await readContainedFile(root, skillFile);
+      const meta = parseFrontmatter(content, label, result);
+      if (!meta) continue;
+      if (!meta.name) addError(result, `${label}: Missing 'name' in frontmatter`);
+      if (!meta.description) result.warnings.push(`${label}: Missing 'description' in frontmatter`);
+      validated++;
+      if (verbose) console.log(chalk.green(`  ✓ skills/${entry.name}/SKILL.md`));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      addError(result, `${entry.name}: ${code === "ENOENT" ? "Missing SKILL.md file" : (error as Error).message}`);
+    }
+  }
+  if (!verbose) console.log(chalk.gray(`  Validated ${validated} skill(s)`));
 }
 
 async function validateAgents(
-  rootPath: string,
+  root: ContainedRoot,
   result: ValidationResult,
-  verbose?: boolean
+  verbose?: boolean,
 ): Promise<void> {
-  const agentsDir = path.join(rootPath, ".github", "agents");
+  const agentsDir = await openManagedDirectory(
+    root,
+    ".github/agents",
+    result,
+    "No .github/agents/ directory found",
+    true,
+  );
+  if (!agentsDir) return;
 
-  try {
-    const entries = await fs.readdir(agentsDir, { withFileTypes: true });
-    const agentMdFiles = entries.filter((e) => e.isFile() && e.name.endsWith(".agent.md"));
-
-    let validatedCount = 0;
-
-    // Validate .agent.md files (VS Code custom agents)
-    for (const file of agentMdFiles) {
-      const agentFile = path.join(agentsDir, file.name);
-      
-      try {
-        const content = await fs.readFile(agentFile, "utf-8");
-
-        // Check for required frontmatter
-        if (!content.startsWith("---")) {
-          result.errors.push(`${file.name}: Missing YAML frontmatter`);
-          result.valid = false;
-          continue;
-        }
-
-        const frontmatterEnd = content.indexOf("---", 3);
-        if (frontmatterEnd === -1) {
-          result.errors.push(`${file.name}: Malformed YAML frontmatter`);
-          result.valid = false;
-          continue;
-        }
-
-        const frontmatter = content.slice(4, frontmatterEnd).trim();
-        const meta = yaml.parse(frontmatter);
-
-        if (!meta.name) {
-          result.errors.push(`${file.name}: Missing 'name' in frontmatter`);
-          result.valid = false;
-        }
-
-        if (!meta.description) {
-          result.warnings.push(`${file.name}: Missing 'description' in frontmatter`);
-        }
-
-        // Validate tools array if present
-        if (meta.tools && !Array.isArray(meta.tools)) {
-          result.errors.push(`${file.name}: 'tools' must be an array`);
-          result.valid = false;
-        }
-
-        validatedCount++;
-
-        if (verbose) {
-          console.log(chalk.green(`  ✓ agents/${file.name}`));
-        }
-      } catch (e) {
-        result.errors.push(`${file.name}: ${(e as Error).message}`);
-        result.valid = false;
+  const entries = await readContainedDirectory(root, agentsDir);
+  const agentFiles = entries.filter(
+    (entry) => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".agent.md"),
+  );
+  let validated = 0;
+  for (const entry of agentFiles) {
+    try {
+      assertPortablePathComponents(entry.name, "agent path");
+      const agentFile = await resolveContainedExistingFile(root, path.join(agentsDir, entry.name));
+      const content = await readContainedFile(root, agentFile);
+      const meta = parseFrontmatter(content, entry.name, result);
+      if (!meta) continue;
+      if (!meta.name) addError(result, `${entry.name}: Missing 'name' in frontmatter`);
+      if (!meta.description) result.warnings.push(`${entry.name}: Missing 'description' in frontmatter`);
+      if (meta.tools && !Array.isArray(meta.tools)) {
+        addError(result, `${entry.name}: 'tools' must be an array`);
       }
+      await validateMarkdownLinks(root, agentFile, content, result);
+      validated++;
+      if (verbose) console.log(chalk.green(`  ✓ agents/${entry.name}`));
+    } catch (error) {
+      addError(result, `${entry.name}: ${(error as Error).message}`);
     }
-
-    if (validatedCount === 0) {
-      result.errors.push("No .agent.md files found in .github/agents/");
-      result.valid = false;
-    }
-
-    if (!verbose) {
-      console.log(chalk.gray(`  Validated ${validatedCount} agent(s)`));
-    }
-  } catch {
-    result.errors.push("No .github/agents/ directory found");
-    result.valid = false;
   }
+  if (validated === 0) addError(result, "No .agent.md files found in .github/agents/");
+  if (!verbose) console.log(chalk.gray(`  Validated ${validated} agent(s)`));
 }
 
 async function validateHooks(
-  rootPath: string,
+  root: ContainedRoot,
   result: ValidationResult,
-  verbose?: boolean
+  verbose?: boolean,
 ): Promise<void> {
-  const hooksDir = path.join(rootPath, ".github", "hooks");
+  const hooksDir = await openManagedDirectory(
+    root,
+    ".github/hooks",
+    result,
+    "No hooks directory",
+    false,
+  );
+  if (!hooksDir) return;
   const validEvents = ["pre-commit", "post-commit", "pre-push", "pre-analyze", "post-generate"];
-
-  try {
-    const files = await fs.readdir(hooksDir);
-    const hookFiles = files.filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"));
-
-    if (hookFiles.length === 0) {
-      if (verbose) {
-        console.log(chalk.gray("  No hooks found"));
+  const entries = await readContainedDirectory(root, hooksDir);
+  const hookFiles = entries.filter(
+    (entry) => (entry.isFile() || entry.isSymbolicLink())
+      && (entry.name.endsWith(".yaml") || entry.name.endsWith(".yml")),
+  );
+  for (const entry of hookFiles) {
+    const label = `hooks/${entry.name}`;
+    try {
+      assertPortablePathComponents(entry.name, "hook path");
+      const hookPath = await resolveContainedExistingFile(root, path.join(hooksDir, entry.name));
+      const hook = yaml.parse(await readContainedFile(root, hookPath));
+      if (!hook?.name) addError(result, `${label}: Missing 'name' field`);
+      if (!hook?.event) {
+        addError(result, `${label}: Missing 'event' field`);
+      } else if (!validEvents.includes(hook.event)) {
+        addError(result, `${label}: Invalid event '${hook.event}'. Must be one of: ${validEvents.join(", ")}`);
       }
-      return;
-    }
-
-    for (const file of hookFiles) {
-      const hookPath = path.join(hooksDir, file);
-      const content = await fs.readFile(hookPath, "utf-8");
-
-      try {
-        const hook = yaml.parse(content);
-
-        if (!hook.name) {
-          result.errors.push(`hooks/${file}: Missing 'name' field`);
-          result.valid = false;
-        }
-
-        if (!hook.event) {
-          result.errors.push(`hooks/${file}: Missing 'event' field`);
-          result.valid = false;
-        } else if (!validEvents.includes(hook.event)) {
-          result.errors.push(
-            `hooks/${file}: Invalid event '${hook.event}'. Must be one of: ${validEvents.join(", ")}`
-          );
-          result.valid = false;
-        }
-
-        if (!hook.commands || !Array.isArray(hook.commands) || hook.commands.length === 0) {
-          result.errors.push(`hooks/${file}: Missing or empty 'commands' array`);
-          result.valid = false;
-        }
-
-        if (verbose) {
-          console.log(chalk.green(`  ✓ hooks/${file}`));
-        }
-      } catch (e) {
-        result.errors.push(`hooks/${file}: Invalid YAML - ${(e as Error).message}`);
-        result.valid = false;
+      if (!Array.isArray(hook?.commands) || hook.commands.length === 0) {
+        addError(result, `${label}: Missing or empty 'commands' array`);
       }
-    }
-
-    if (!verbose) {
-      console.log(chalk.gray(`  Validated ${hookFiles.length} hook(s)`));
-    }
-  } catch {
-    // No hooks directory - that's okay
-    if (verbose) {
-      console.log(chalk.gray("  No hooks directory"));
+      if (verbose) console.log(chalk.green(`  ✓ ${label}`));
+    } catch (error) {
+      addError(result, `${label}: ${(error as Error).message}`);
     }
   }
+  if (!verbose) console.log(chalk.gray(`  Validated ${hookFiles.length} hook(s)`));
 }
 
 async function validateRegistry(
-  rootPath: string,
+  root: ContainedRoot,
   result: ValidationResult,
-  verbose?: boolean
+  verbose?: boolean,
 ): Promise<void> {
-  const registryPath = path.join(rootPath, "skills-registry.jsonl");
-
+  const registryPath = path.join(root.requestedRoot, "skills-registry.jsonl");
+  let content: string;
   try {
-    const content = await fs.readFile(registryPath, "utf-8");
-    const lines = content.trim().split("\n").filter((l) => l.trim());
-
-    if (lines.length === 0) {
-      result.warnings.push("skills-registry.jsonl is empty");
-      return;
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        if (!entry.name || !entry.type) {
-          result.errors.push(`skills-registry.jsonl line ${i + 1}: Missing 'name' or 'type'`);
-          result.valid = false;
-        }
-      } catch {
-        result.errors.push(`skills-registry.jsonl line ${i + 1}: Invalid JSON`);
-        result.valid = false;
-      }
-    }
-
-    if (verbose) {
-      console.log(chalk.green(`  ✓ skills-registry.jsonl (${lines.length} entries)`));
+    content = await readContainedFile(root, registryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      result.warnings.push("No skills-registry.jsonl found");
     } else {
-      console.log(chalk.gray(`  Validated registry (${lines.length} entries)`));
+      addError(result, `skills-registry.jsonl: ${(error as Error).message}`);
     }
-  } catch {
-    result.warnings.push("No skills-registry.jsonl found");
+    return;
   }
+
+  const lines = content.trim().split("\n").filter((line) => line.trim());
+  if (lines.length === 0) {
+    result.warnings.push("skills-registry.jsonl is empty");
+    return;
+  }
+  const seenNames = new Set<string>();
+  const seenPaths = new Set<string>();
+
+  for (let index = 0; index < lines.length; index++) {
+    const lineLabel = `skills-registry.jsonl line ${index + 1}`;
+    try {
+      const entry = JSON.parse(lines[index]) as Record<string, unknown>;
+      if (
+        typeof entry.name !== "string"
+        || (entry.type !== "skill" && entry.type !== "agent")
+        || typeof entry.file !== "string"
+        || !entry.name
+        || !entry.file
+      ) {
+        addError(result, `${lineLabel}: Missing or invalid 'name', 'type', or 'file'`);
+        continue;
+      }
+      const type = entry.type as RegistryAssetType;
+      let canonical: string;
+      try {
+        canonical = canonicalizeRegistryAssetPath(entry.file, type);
+      } catch (error) {
+        addError(result, `${lineLabel} (${type} '${entry.name}'): ${(error as Error).message}`);
+        continue;
+      }
+      const nameKey = `${type}:${entry.name.normalize("NFC").toLowerCase()}`;
+      const pathKey = registryPathKey(canonical);
+      if (seenNames.has(nameKey)) addError(result, `${lineLabel}: Duplicate registry name: ${entry.name}`);
+      if (seenPaths.has(pathKey)) addError(result, `${lineLabel}: Duplicate registry path: ${canonical}`);
+      seenNames.add(nameKey);
+      seenPaths.add(pathKey);
+      await validateReferencedFile(
+        root,
+        canonical,
+        result,
+        `${lineLabel} (${type} '${entry.name}')`,
+      );
+
+      if (entry.vsCodeAgent !== undefined) {
+        if (type !== "agent" || typeof entry.vsCodeAgent !== "string") {
+          addError(result, `${lineLabel}: Only agent entries may define a string 'vsCodeAgent'`);
+        } else {
+          try {
+            const agentPath = canonicalizeRegistryAssetPath(entry.vsCodeAgent, "agent");
+            if (agentPath !== canonical) {
+              addError(result, `${lineLabel}: 'vsCodeAgent' must match the agent file path`);
+            }
+          } catch (error) {
+            addError(result, `${lineLabel}: ${(error as Error).message}`);
+          }
+        }
+      }
+    } catch {
+      addError(result, `${lineLabel}: Invalid JSON`);
+    }
+  }
+
+  const message = `skills-registry.jsonl (${lines.length} entries)`;
+  console.log(verbose ? chalk.green(`  ✓ ${message}`) : chalk.gray(`  Validated registry (${lines.length} entries)`));
 }

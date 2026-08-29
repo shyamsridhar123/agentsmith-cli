@@ -1,14 +1,10 @@
 /**
- * Generator - The Replicator
- * Writes SKILL.md files and .agent.md constellation for VS Code.
- * v0.4: Multi-agent constellation with root orchestrator + domain sub-agents.
- * "More..."
+ * Generator - writes skills, agents, handoffs, instructions, hooks, and freshness metadata.
  */
 
-import fs from "fs/promises";
 import path from "path";
-import crypto from "crypto";
-import type { AnalysisResult, SkillDefinition, AgentDefinition, HookDefinition } from "../analyzer/index.js";
+import yaml from "yaml";
+import type { AnalysisResult, HookDefinition } from "../analyzer/index.js";
 import {
   buildCopilotInstructions,
   buildDirectoryInstructions,
@@ -21,521 +17,369 @@ import {
   buildSubAgentCoordination,
   extendHandoffGraph,
 } from "./hub-writer.js";
+import { buildMainAgentMd, buildSkillMarkdown } from "./legacy-writer.js";
+import {
+  createGenerationPlan,
+  sanitizeAgentStem,
+  type PlannedAgentFile,
+  type PlannedHookFile,
+  type PlannedSkillFile,
+} from "./generation-plan.js";
+import {
+  previousManagedFiles,
+  readFreshness,
+  serializeFreshness,
+  type FreshnessMetadata,
+} from "./freshness.js";
+import {
+  digestManagedContent,
+  hasManagedAssetMarker,
+  markManagedAsset,
+  type ManagedAssetKind,
+} from "./managed-assets.js";
+import {
+  atomicWriteContainedFile,
+  assertPortablePathComponents,
+  createContainedRoot,
+  ensureContainedDirectory,
+  readContainedFile,
+  removeContainedExistingFile,
+  type ContainedRoot,
+} from "./path-safety.js";
 
 export interface GeneratorResult {
   files: string[];
+  hookFiles: string[];
+  agentFiles: Array<{ name: string; file: string; isSubAgent: boolean }>;
+  skillFiles: Array<{ name: string; file: string }>;
 }
 
 export class Generator {
-  private rootPath: string;
-  private dryRun: boolean;
-  private verbose: boolean;
-  private noInstructions: boolean;
-  private singleAgent: boolean;
-  private hubUrl?: string;
+  private containedRoot?: Promise<ContainedRoot>;
+  private generatedDigests = new Map<string, string>();
 
   constructor(
-    rootPath: string,
-    dryRun = false,
-    verbose = false,
-    noInstructions = false,
-    singleAgent = false,
-    hubUrl?: string,
-  ) {
-    this.rootPath = rootPath;
-    this.dryRun = dryRun;
-    this.verbose = verbose;
-    this.noInstructions = noInstructions;
-    this.singleAgent = singleAgent;
-    this.hubUrl = hubUrl;
-  }
+    private rootPath: string,
+    private dryRun = false,
+    private verbose = false,
+    private noInstructions = false,
+    private singleAgent = false,
+    private hubUrl?: string,
+  ) {}
 
   async generate(analysis: AnalysisResult): Promise<GeneratorResult> {
-    const files: string[] = [];
-    for (const skill of analysis.skills) {
-      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(skill.name)) {
-        throw new Error(`Unsafe skill name: ${skill.name}`);
-      }
-    }
-
-    // Create .github/skills/, .github/agents/, and .github/hooks/ directories
-    const skillsDir = path.join(this.rootPath, ".github", "skills");
-    const agentsDir = path.join(this.rootPath, ".github", "agents");
-    const hooksDir = path.join(this.rootPath, ".github", "hooks");
+    this.generatedDigests.clear();
+    const plan = createGenerationPlan(analysis, this.singleAgent);
+    const result: GeneratorResult = {
+      files: [],
+      hookFiles: plan.hookFiles.map((hook) => hook.file),
+      agentFiles: plan.agentFiles.map(({ name, file, isSubAgent }) => ({
+        name,
+        file,
+        isSubAgent,
+      })),
+      skillFiles: plan.skillFiles.map(({ name, file }) => ({ name, file })),
+    };
+    let previous: FreshnessMetadata | undefined;
 
     if (!this.dryRun) {
-      await fs.mkdir(skillsDir, { recursive: true });
-      await fs.mkdir(agentsDir, { recursive: true });
-      await fs.mkdir(hooksDir, { recursive: true });
+      const root = await this.getContainedRoot();
+      previous = await readFreshness(root);
+      await Promise.all([
+        this.ensureOutputDirectory(".github/skills"),
+        this.ensureOutputDirectory(".github/agents"),
+        this.ensureOutputDirectory(".github/hooks"),
+      ]);
     }
 
-    // Generate SKILL.md for each skill (unchanged)
-    for (const skill of analysis.skills) {
-      const skillPath = await this.generateSkill(skill, skillsDir);
-      files.push(skillPath);
+    for (const skill of plan.skillFiles) {
+      await this.generateSkill(skill);
+      result.files.push(skill.file);
+    }
+    for (const agent of plan.agentFiles) {
+      await this.generateAgent(agent, analysis);
+      result.files.push(agent.file);
+    }
+    if (plan.handoffFile) {
+      await this.generateHandoffs(analysis, plan.handoffFile);
+      result.files.push(plan.handoffFile);
     }
 
-    // Agent generation: single-agent (v0.3 compat) or multi-agent constellation (v0.4)
-    if (this.singleAgent) {
-      // v0.3 compatibility: single .agent.md
-      const agentPath = await this.generateMainAgent(analysis, agentsDir);
-      files.push(agentPath);
-    } else {
-      // v0.4: multi-agent constellation
-      const hasSubAgents = analysis.agents.some(a => a.isSubAgent);
-
-      if (!hasSubAgents) {
-        // No sub-agents detected — fall back to single agent like v0.3
-        const agentPath = await this.generateMainAgent(analysis, agentsDir);
-        files.push(agentPath);
-      } else {
-        // Generate individual .agent.md files for each agent
-        for (const agent of analysis.agents) {
-          const agentPath = await this.generateAgentFile(agent, analysis, agentsDir);
-          files.push(agentPath);
-        }
-
-        // Generate handoffs.json delegation graph
-        const handoffPath = await this.generateHandoffs(
-          analysis.agents,
-          analysis.repoName,
-        );
-        files.push(handoffPath);
-      }
-    }
-
-    // Generate .github/copilot-instructions.md (workspace-wide Copilot config)
     if (!this.noInstructions) {
-      const instructionsPath = await this.generateCopilotInstructions(analysis);
-      files.push(instructionsPath);
-      files.push(...await this.generateDirectoryInstructions(analysis));
+      result.files.push(await this.generateCopilotInstructions(analysis));
+      result.files.push(...await this.generateDirectoryInstructions(analysis));
     }
 
-    // Generate hook.yaml for each hook (unchanged)
-    for (const hook of analysis.hooks) {
-      const hookPath = await this.generateHook(hook, hooksDir);
-      files.push(hookPath);
+    for (const hook of plan.hookFiles) {
+      await this.generateHook(hook);
+      result.files.push(hook.file);
     }
 
-    files.push(await this.generateFreshness(analysis));
+    if (!this.dryRun) {
+      await this.reconcileStaleManagedFiles(previous, result, plan.handoffFile);
+    }
+    result.files.push(await this.generateFreshness(analysis, result, plan.handoffFile));
 
-    return { files };
+    if (this.verbose) {
+      console.log(`Generated ${result.files.length} Agent Smith asset(s).`);
+    }
+    return result;
   }
 
-  /**
-   * Generate an individual .agent.md file for a single agent in the constellation.
-   * Root agents get `runSubagent`; sub-agents are leaf specialists.
-   */
-  private async generateAgentFile(
-    agent: AgentDefinition,
+  private async generateSkill(plan: PlannedSkillFile): Promise<void> {
+    const content = buildSkillMarkdown(plan.skill, this.writerHelpers());
+    await this.write(plan.file, content, true);
+  }
+
+  private async generateAgent(
+    plan: PlannedAgentFile,
     analysis: AnalysisResult,
-    agentsDir: string,
-  ): Promise<string> {
-    const helpers = {
-      toTitleCase: this.toTitleCase.bind(this),
-      quoteYamlValue: this.quoteYamlValue.bind(this),
-    };
-
-    let fileName: string;
+  ): Promise<void> {
     let content: string;
-
-    if (!agent.isSubAgent) {
-      // Root orchestrator agent
-      fileName = `${this.sanitizeAgentName(analysis.repoName)}-root.agent.md`;
-      content = buildRootAgentMd(
+    if (plan.combined) {
+      content = buildMainAgentMd(
         analysis,
-        `${this.sanitizeAgentName(analysis.repoName)}-root`,
-        helpers,
+        sanitizeAgentStem(analysis.repoName),
+        this.writerHelpers(),
       );
       if (this.hubUrl) {
-        content += "\n" + buildCoordinationSection(analysis.repoName, this.hubUrl);
+        content += `\n${buildCoordinationSection(analysis.repoName, this.hubUrl)}`;
+      }
+    } else if (plan.agent?.isSubAgent) {
+      content = buildSubAgentMd(plan.agent, analysis.skills, this.writerHelpers());
+      if (this.hubUrl) {
+        content += `\n${buildSubAgentCoordination(
+          plan.agent.name,
+          analysis.repoName,
+          this.hubUrl,
+        )}`;
       }
     } else {
-      // Domain sub-agent
-      fileName = `${this.sanitizeAgentName(agent.name)}.agent.md`;
-      content = buildSubAgentMd(agent, analysis.skills, helpers);
+      content = buildRootAgentMd(
+        analysis,
+        `${sanitizeAgentStem(analysis.repoName)}-root`,
+        this.writerHelpers(),
+      );
       if (this.hubUrl) {
-        content += "\n" + buildSubAgentCoordination(agent.name, analysis.repoName, this.hubUrl);
+        content += `\n${buildCoordinationSection(analysis.repoName, this.hubUrl)}`;
       }
     }
-
-    const mdFile = path.join(agentsDir, fileName);
-    const relativePath = `.github/agents/${fileName}`;
-
-    if (!this.dryRun) {
-      await fs.writeFile(mdFile, content, "utf-8");
-    }
-
-    return relativePath;
+    await this.write(plan.file, content, true);
   }
 
-  /**
-   * Generate .github/copilot/handoffs.json with the delegation graph.
-   */
   private async generateHandoffs(
-    agents: AgentDefinition[],
-    repoName: string,
-  ): Promise<string> {
-    const copilotDir = path.join(this.rootPath, ".github", "copilot");
-    const handoffFile = path.join(copilotDir, "handoffs.json");
-    const relativePath = ".github/copilot/handoffs.json";
-
-    const graph = buildHandoffGraph(agents);
+    analysis: AnalysisResult,
+    relativePath: string,
+  ): Promise<void> {
+    const graph = buildHandoffGraph(analysis.agents);
     const finalGraph = this.hubUrl
-      ? extendHandoffGraph(graph, this.hubUrl, repoName)
+      ? extendHandoffGraph(graph, this.hubUrl, analysis.repoName)
       : graph;
-    const content = serializeHandoffGraph(finalGraph);
-
-    if (!this.dryRun) {
-      await fs.mkdir(copilotDir, { recursive: true });
-      await fs.writeFile(handoffFile, content, "utf-8");
-    }
-
-    return relativePath;
+    await this.write(relativePath, serializeHandoffGraph(finalGraph), true);
   }
 
-  /**
-   * Sanitize a name for use as a filename.
-   */
-  private sanitizeAgentName(name: string): string {
-    return name.toLowerCase().replace(/[^a-z0-9]/g, "-") || "repo";
-  }
-
-  // ---- Preserved v0.3 methods below (unchanged) ----
-
-  private async generateSkill(skill: SkillDefinition, skillsDir: string): Promise<string> {
-    const skillDir = path.join(skillsDir, skill.name);
-    const skillFile = path.join(skillDir, "SKILL.md");
-    const relativePath = `.github/skills/${skill.name}/SKILL.md`;
-
-    const content = this.buildSkillMarkdown(skill);
-
-    if (!this.dryRun) {
-      await fs.mkdir(skillDir, { recursive: true });
-      await fs.writeFile(skillFile, content, "utf-8");
-    }
-
-    return relativePath;
-  }
-
-  private buildSkillMarkdown(skill: SkillDefinition): string {
-    const patterns = skill.patterns.length > 0
-      ? skill.patterns.map((p) => `- ${p}`).join("\n")
-      : "- Patterns extracted from codebase analysis";
-
-    const examples = skill.examples.length > 0
-      ? skill.examples.map((e) => `\`\`\`\n${e}\n\`\`\``).join("\n\n")
-      : "See source files in the repository for examples.";
-
-    const antiPatterns = skill.antiPatterns && skill.antiPatterns.length > 0
-      ? `\n## Anti-Patterns\n\n${skill.antiPatterns.map((item) => `- ${item}`).join("\n")}\n`
-      : "";
-    const references = skill.codebaseReferences && skill.codebaseReferences.length > 0
-      ? `\n## Codebase References\n\nUse \`#codebase\` to inspect:\n\n${skill.codebaseReferences.map((item) => `- \`${item}\``).join("\n")}\n`
-      : "";
-
-    return `---
-name: ${this.quoteYamlValue(skill.name)}
-description: ${this.quoteYamlValue(skill.description)}
----
-
-# ${this.toTitleCase(skill.name)}
-
-${skill.description}
-
-## When to Use
-
-Use this skill when:
-
-- Working with code in \`${skill.sourceDir}/\`
-${skill.triggers.map((t) => `- User mentions "${t}"`).join("\n")}
-
-## Patterns
-
-${patterns}
-${antiPatterns}
-${references}
-
-## Examples
-
-${examples}
-
-## Category
-
-**${skill.category}** - ${this.getCategoryDescription(skill.category)}
-`;
-  }
-
-  private async generateDirectoryInstructions(analysis: AnalysisResult): Promise<string[]> {
+  private async generateDirectoryInstructions(
+    analysis: AnalysisResult,
+  ): Promise<string[]> {
     const generated: string[] = [];
     for (const instruction of buildDirectoryInstructions(analysis)) {
       const directoryPath = path.resolve(this.rootPath, instruction.directory);
       const relative = path.relative(this.rootPath, directoryPath);
       if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
-      const filePath = path.join(directoryPath, ".copilot-instructions.md");
+      const relativePath = path.posix.join(
+        instruction.directory.replace(/\\/g, "/"),
+        ".copilot-instructions.md",
+      );
+      let content = instruction.content;
       if (!this.dryRun) {
-        await fs.mkdir(directoryPath, { recursive: true });
-        let content = instruction.content;
         try {
-          content = mergeWithExisting(await fs.readFile(filePath, "utf-8"), instruction.content);
-        } catch {
-          // The file does not exist yet.
+          content = mergeWithExisting(
+            await readContainedFile(await this.getContainedRoot(), this.absolute(relativePath)),
+            instruction.content,
+          );
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
-        await fs.writeFile(filePath, content, "utf-8");
       }
-      generated.push(path.posix.join(instruction.directory.replace(/\\/g, "/"), ".copilot-instructions.md"));
+      await this.write(relativePath, content);
+      generated.push(relativePath);
     }
     return generated;
   }
 
-  private async generateFreshness(analysis: AnalysisResult): Promise<string> {
-    const relativePath = ".github/copilot/freshness.json";
+  private async generateCopilotInstructions(
+    analysis: AnalysisResult,
+  ): Promise<string> {
+    const relativePath = ".github/copilot-instructions.md";
+    const managedBlock = buildCopilotInstructions(analysis);
+    let content = managedBlock;
     if (!this.dryRun) {
-      const copilotDir = path.join(this.rootPath, ".github", "copilot");
-      await fs.mkdir(copilotDir, { recursive: true });
-      const skills = Object.fromEntries(analysis.skills.map((skill) => [
-        skill.name,
-        {
-          sourceDir: skill.sourceDir,
-          fingerprint: crypto.createHash("sha256")
-            .update(JSON.stringify({
-              patterns: skill.patterns,
-              references: skill.codebaseReferences ?? [],
-            }))
-            .digest("hex"),
-        },
-      ]));
-      await fs.writeFile(
-        path.join(copilotDir, "freshness.json"),
-        `${JSON.stringify({
-          schemaVersion: 1,
-          generatedAt: new Date().toISOString(),
-          repoName: analysis.repoName,
-          skills,
-        }, null, 2)}\n`,
-        "utf-8",
-      );
+      try {
+        content = mergeWithExisting(
+          await readContainedFile(await this.getContainedRoot(), this.absolute(relativePath)),
+          managedBlock,
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
+    await this.write(relativePath, content);
     return relativePath;
   }
 
-  /**
-   * Quote a YAML value if it contains special characters
-   */
+  private async generateHook(plan: PlannedHookFile): Promise<void> {
+    await this.write(plan.file, this.buildHookYaml(plan.hook), true);
+  }
+
+  private async generateFreshness(
+    analysis: AnalysisResult,
+    result: GeneratorResult,
+    handoffFile?: string,
+  ): Promise<string> {
+    const relativePath = ".github/copilot/freshness.json";
+    await this.write(
+      relativePath,
+      serializeFreshness(analysis, result, handoffFile, this.generatedDigests),
+    );
+    return relativePath;
+  }
+
+  private async reconcileStaleManagedFiles(
+    previous: FreshnessMetadata | undefined,
+    result: GeneratorResult,
+    currentHandoff?: string,
+  ): Promise<void> {
+    const currentFiles = new Set([
+      ...result.agentFiles.map((agent) => agent.file),
+      ...result.skillFiles.map((skill) => skill.file),
+      ...result.hookFiles,
+      ...(currentHandoff ? [currentHandoff] : []),
+    ].map((file) => this.pathKey(file)));
+
+    for (const stale of previousManagedFiles(previous)) {
+      let canonical: string;
+      try {
+        canonical = this.assertManagedPath(stale.file, stale.kind);
+      } catch {
+        continue;
+      }
+      if (!currentFiles.has(this.pathKey(canonical))) {
+        await this.removeIfOwnedAndUnchanged(canonical, stale.digest);
+      }
+    }
+  }
+
+  private assertManagedPath(file: string, kind: ManagedAssetKind): string {
+    const normalized = file.replace(/\\/g, "/");
+    assertPortablePathComponents(normalized, `managed ${kind} path`);
+    const safe = normalized === path.posix.normalize(normalized) && (
+      (kind === "agent" && /^\.github\/agents\/[^/]+\.agent\.md$/.test(normalized))
+      || (kind === "skill" && /^\.github\/skills\/[^/]+\/SKILL\.md$/.test(normalized))
+      || (kind === "hook" && /^\.github\/hooks\/[^/]+\.ya?ml$/.test(normalized))
+      || (kind === "handoff" && normalized === ".github/copilot/handoffs.json")
+    );
+    if (!safe) {
+      throw new Error(`Unsafe managed ${kind} path in freshness metadata: ${file}`);
+    }
+    return normalized;
+  }
+
+  private async removeIfOwnedAndUnchanged(
+    relativePath: string,
+    expectedDigest: string,
+  ): Promise<void> {
+    const root = await this.getContainedRoot();
+    const absolutePath = this.absolute(relativePath);
+    try {
+      const content = await readContainedFile(root, absolutePath);
+      if (
+        digestManagedContent(content) !== expectedDigest
+        || !hasManagedAssetMarker(relativePath, content)
+      ) {
+        return;
+      }
+      await removeContainedExistingFile(root, absolutePath, expectedDigest);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  private buildHookYaml(hook: HookDefinition): string {
+    const document = {
+      name: hook.name,
+      event: hook.event,
+      description: hook.description,
+      commands: hook.commands,
+      ...(hook.condition ? { condition: hook.condition } : {}),
+    };
+    return `# Hook Configuration
+# Generated by Agent Smith
+
+${yaml.stringify(document, { lineWidth: 0 })}`;
+  }
+
+  private writerHelpers(): {
+    toTitleCase: (value: string | unknown) => string;
+    quoteYamlValue: (value: string) => string;
+  } {
+    return {
+      toTitleCase: this.toTitleCase.bind(this),
+      quoteYamlValue: this.quoteYamlValue.bind(this),
+    };
+  }
+
+  private absolute(relativePath: string): string {
+    return path.join(this.rootPath, ...relativePath.split("/"));
+  }
+
+  private pathKey(file: string): string {
+    return path.posix.normalize(file).normalize("NFC").toLowerCase();
+  }
+
+  private getContainedRoot(): Promise<ContainedRoot> {
+    this.containedRoot ??= createContainedRoot(this.rootPath);
+    return this.containedRoot;
+  }
+
+  private async ensureOutputDirectory(relativePath: string): Promise<string> {
+    return ensureContainedDirectory(
+      await this.getContainedRoot(),
+      this.absolute(relativePath),
+    );
+  }
+
+  private async write(
+    relativePath: string,
+    content: string,
+    managed = false,
+  ): Promise<void> {
+    const finalContent = managed ? markManagedAsset(relativePath, content) : content;
+    if (managed) {
+      this.generatedDigests.set(relativePath, digestManagedContent(finalContent));
+    }
+    if (this.dryRun) return;
+    await atomicWriteContainedFile(
+      await this.getContainedRoot(),
+      this.absolute(relativePath),
+      finalContent,
+    );
+  }
+
   private quoteYamlValue(value: string): string {
-    // Quote if contains: colon followed by space, leading/trailing whitespace,
-    // or special YAML characters
     if (/[:#{}[\]&*?|>!%@`]/.test(value) || value.startsWith("'") || value.startsWith('"')) {
-      // Escape internal double quotes and wrap in double quotes
-      return `"${this.escapeYamlString(value)}"`;
+      return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
     }
     return value;
   }
 
-  /**
-   * Escape a string for use inside YAML double quotes
-   */
-  private escapeYamlString(value: string): string {
-    return value
-      .replace(/\\/g, "\\\\")  // Escape backslashes first
-      .replace(/"/g, '\\"');   // Escape double quotes
-  }
-
-  private getCategoryDescription(category: string): string {
-    const descriptions: Record<string, string> = {
-      architecture: "Structural patterns and system design",
-      reliability: "Error handling, recovery, and fault tolerance",
-      quality: "Testing, validation, and code quality",
-      security: "Authentication, authorization, and data protection",
-      patterns: "Common code patterns and conventions",
-    };
-    return descriptions[category] || "General patterns";
-  }
-
-  /**
-   * Generate ONE main .agent.md file for the entire repo (v0.3 single-agent mode)
-   * This is the VS Code custom agent format
-   * @see https://code.visualstudio.com/docs/copilot/customization/custom-agents
-   */
-  private async generateMainAgent(analysis: AnalysisResult, agentsDir: string): Promise<string> {
-    // Use repo name from analysis (not output directory)
-    const agentName = analysis.repoName.toLowerCase().replace(/[^a-z0-9]/g, "-") || "repo";
-    const mdFile = path.join(agentsDir, `${agentName}.agent.md`);
-    const relativePath = `.github/agents/${agentName}.agent.md`;
-
-    let content = this.buildMainAgentMd(analysis, agentName);
-    if (this.hubUrl) {
-      content += "\n" + buildCoordinationSection(analysis.repoName, this.hubUrl);
+  private toTitleCase(value: string | unknown): string {
+    let text = value;
+    if (typeof text !== "string") {
+      text = text && typeof text === "object" && "name" in text
+        ? (text as { name: string }).name
+        : String(text ?? "unknown");
     }
-
-    if (!this.dryRun) {
-      await fs.writeFile(mdFile, content, "utf-8");
-    }
-
-    return relativePath;
-  }
-
-  /**
-   * Build the main .agent.md content (v0.3 single-agent mode)
-   * Single agent that knows about all skills in the repo
-   */
-  private buildMainAgentMd(analysis: AnalysisResult, agentName: string): string {
-    // Get root agent info if available
-    const rootAgent = analysis.agents.find(a => !a.isSubAgent);
-    const description = rootAgent?.description || analysis.summary || "AI assistant for this repository";
-
-    // Collect all tools from all agents
-    const allTools = new Set<string>();
-    for (const agent of analysis.agents) {
-      for (const tool of agent.tools) {
-        allTools.add(tool.command);
-      }
-    }
-
-    // VS Code built-in tools - comprehensive set for full agent capability
-    const vsCodeTools = [
-      "codebase",        // Semantic code search
-      "textSearch",      // Find text in files
-      "fileSearch",      // Search files by glob
-      "readFile",        // Read file content
-      "listDirectory",   // List directory contents
-      "usages",          // Find references/implementations
-      "problems",        // Workspace issues
-      "fetch",           // Fetch web pages
-      "githubRepo",      // Search GitHub repos
-      "editFiles",       // Apply edits to files
-      "createFile",      // Create new files
-      "createDirectory", // Create directories
-      "runInTerminal",   // Run shell commands
-      "terminalLastCommand", // Get last terminal output
-      "changes",         // Source control changes
-    ];
-
-    const toolsList = `tools: [${vsCodeTools.map(t => `'${t}'`).join(", ")}]`;
-
-    // Build skills section - link to all generated skills
-    const skillsSection = analysis.skills.length > 0
-      ? analysis.skills.map(s => `- [${this.toTitleCase(s.name)}](../skills/${s.name}/SKILL.md): ${s.description}`).join("\n")
-      : "No specific skills documented yet.";
-
-    // Build commands section from detected tools
-    const commandsSection = allTools.size > 0
-      ? Array.from(allTools).map(cmd => `- \`${cmd}\``).join("\n")
-      : "- `npm install` / `pip install` / `go build` (as appropriate)";
-
-    return `---
-name: ${this.toTitleCase(agentName)}
-description: ${this.quoteYamlValue(description)}
-${toolsList}
----
-
-# ${this.toTitleCase(agentName)} Agent
-
-${description}
-
-## Skills
-
-This agent has knowledge of the following patterns and conventions:
-
-${skillsSection}
-
-## Commands
-
-Common commands for this repository:
-
-${commandsSection}
-
-## Instructions
-
-You are an AI assistant specialized in this codebase. When working on tasks:
-
-1. Use \`#codebase\` to search for relevant code patterns
-2. Reference the skills above to follow established conventions
-3. Use \`#textSearch\` to find specific implementations
-4. Use \`#editFiles\` to make changes that follow detected patterns
-5. Use \`#runInTerminal\` to execute build, test, and lint commands
-6. Check \`#problems\` to ensure changes don't introduce errors
-
-Always follow the patterns documented in the linked skills when making changes.
-`;
-  }
-
-  /**
-   * Generate .github/copilot-instructions.md
-   * Supports idempotent re-generation by preserving content outside managed markers.
-   */
-  private async generateCopilotInstructions(analysis: AnalysisResult): Promise<string> {
-    const githubDir = path.join(this.rootPath, ".github");
-    const filePath = path.join(githubDir, "copilot-instructions.md");
-    const relativePath = ".github/copilot-instructions.md";
-
-    const managedBlock = buildCopilotInstructions(analysis);
-
-    let finalContent = managedBlock;
-
-    if (!this.dryRun) {
-      await fs.mkdir(githubDir, { recursive: true });
-
-      // Check for existing file to preserve user content outside markers
-      try {
-        const existing = await fs.readFile(filePath, "utf-8");
-        finalContent = mergeWithExisting(existing, managedBlock);
-      } catch {
-        // File doesn't exist yet - use managed block as-is
-      }
-
-      await fs.writeFile(filePath, finalContent, "utf-8");
-    }
-
-    return relativePath;
-  }
-
-  private async generateHook(hook: HookDefinition, hooksDir: string): Promise<string> {
-    const hookFile = path.join(hooksDir, `${hook.name}.yaml`);
-    const relativePath = `.github/hooks/${hook.name}.yaml`;
-
-    const content = this.buildHookYaml(hook);
-
-    if (!this.dryRun) {
-      await fs.writeFile(hookFile, content, "utf-8");
-    }
-
-    return relativePath;
-  }
-
-  private buildHookYaml(hook: HookDefinition): string {
-    const commandsList = hook.commands.map((c) => `  - "${c}"`).join("\n");
-
-    let content = `# Hook Configuration
-# Generated by Agent Smith
-# "Never send a human to do a machine's job."
-
-name: ${hook.name}
-event: ${hook.event}
-description: ${hook.description}
-
-# Commands to execute
-commands:
-${commandsList}
-`;
-
-    if (hook.condition) {
-      content += `\n# Condition for hook execution\ncondition: "${hook.condition}"\n`;
-    }
-
-    return content;
-  }
-
-  private toTitleCase(str: string | unknown): string {
-    // Handle non-string inputs (objects, undefined, etc.)
-    if (typeof str !== "string") {
-      if (str && typeof str === "object" && "name" in str) {
-        str = (str as { name: string }).name;
-      } else {
-        str = String(str ?? "unknown");
-      }
-    }
-    return (str as string)
+    return (text as string)
       .split("-")
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(" ");

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   ensureCoordinationChannels: vi.fn(),
   recordRun: vi.fn(),
   postRunSummary: vi.fn(),
+  snapshotRunFiles: vi.fn(),
 }));
 
 vi.mock("../../src/hub/client.js", () => ({
@@ -33,6 +34,7 @@ vi.mock("../../src/hub/recorder.js", () => ({
   ensureCoordinationChannels: mocks.ensureCoordinationChannels,
   recordRun: mocks.recordRun,
   postRunSummary: mocks.postRunSummary,
+  snapshotRunFiles: mocks.snapshotRunFiles,
 }));
 
 import {
@@ -55,6 +57,10 @@ describe("assimilate AgentHub integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.exitCode = 0;
+    mocks.snapshotRunFiles.mockResolvedValue({
+      files: new Map([["artifact.txt", Buffer.from("generated")]]),
+      registryMissing: true,
+    });
   });
 
   afterEach(() => {
@@ -133,8 +139,9 @@ describe("assimilate AgentHub integration", () => {
         outputPath,
       );
 
-      const recordedFiles = mocks.recordRun.mock.calls[0][1] as Map<string, string>;
-      expect(recordedFiles.get("artifact.txt")).toBe("generated");
+      const recordedFiles = mocks.recordRun.mock.calls[0][1] as Map<string, Uint8Array>;
+      expect(Buffer.from(recordedFiles.get("artifact.txt")!).toString("utf-8"))
+        .toBe("generated");
       expect(recordedFiles.has("skills-registry.jsonl")).toBe(false);
     } finally {
       await rm(outputPath, { recursive: true, force: true });

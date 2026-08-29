@@ -4,8 +4,9 @@
  * "We're not here because we're free. We're here because we're not free."
  */
 
-import fs from "fs/promises";
-import path from "path";
+import { constants as fsConstants, type Stats } from "node:fs";
+import fs, { type FileHandle } from "node:fs/promises";
+import path from "node:path";
 
 export interface LicenseInfo {
   detected: boolean;
@@ -61,21 +62,241 @@ const LICENSE_FILES = [
   "COPYING.txt",
 ];
 
+interface SecureRepository {
+  rootPath: string;
+  realRootPath: string;
+  rootIdentity: Stats;
+}
+
+function comparisonPath(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function samePath(left: string, right: string): boolean {
+  return comparisonPath(left) === comparisonPath(right);
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isContainedPath(rootPath: string, candidatePath: string): boolean {
+  const relativePath = path.relative(rootPath, candidatePath);
+  return (
+    relativePath === "" ||
+    (!relativePath.startsWith(`..${path.sep}`) &&
+      relativePath !== ".." &&
+      !path.isAbsolute(relativePath))
+  );
+}
+
+function isSafeFileStat(fileStat: Stats): boolean {
+  return fileStat.isFile() && fileStat.nlink === 1;
+}
+
+async function hasLinkedPathComponent(filePath: string): Promise<boolean> {
+  const resolvedPath = path.resolve(filePath);
+  const root = path.parse(resolvedPath).root;
+  const segments = path.relative(root, resolvedPath)
+    .split(path.sep)
+    .filter(Boolean);
+  let current = root;
+
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    if ((await fs.lstat(current)).isSymbolicLink()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function unchangedDuringRead(before: Stats, after: Stats): boolean {
+  return (
+    sameFileIdentity(before, after) &&
+    before.size === after.size &&
+    before.mtimeMs === after.mtimeMs &&
+    before.ctimeMs === after.ctimeMs &&
+    isSafeFileStat(after)
+  );
+}
+
+async function repositoryRootIsStable(
+  repository: SecureRepository,
+): Promise<boolean> {
+  try {
+    const [pathStat, resolvedPath, resolvedStat] = await Promise.all([
+      fs.lstat(repository.rootPath),
+      fs.realpath(repository.rootPath),
+      fs.stat(repository.realRootPath),
+    ]);
+
+    return (
+      pathStat.isDirectory() &&
+      resolvedStat.isDirectory() &&
+      !pathStat.isSymbolicLink() &&
+      !await hasLinkedPathComponent(repository.rootPath) &&
+      sameFileIdentity(repository.rootIdentity, pathStat) &&
+      sameFileIdentity(repository.rootIdentity, resolvedStat) &&
+      samePath(repository.realRootPath, resolvedPath)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function openSecureRepository(
+  repoPath: string,
+): Promise<SecureRepository | undefined> {
+  const rootPath = path.resolve(repoPath);
+
+  try {
+    const pathStat = await fs.lstat(rootPath);
+    if (!pathStat.isDirectory() || pathStat.isSymbolicLink()) {
+      return undefined;
+    }
+
+    const realRootPath = await fs.realpath(rootPath);
+    const rootIdentity = await fs.stat(realRootPath);
+    if (
+      !rootIdentity.isDirectory() ||
+      await hasLinkedPathComponent(rootPath) ||
+      !sameFileIdentity(rootIdentity, pathStat)
+    ) {
+      return undefined;
+    }
+
+    const repository: SecureRepository = {
+      rootPath,
+      realRootPath,
+      rootIdentity,
+    };
+    if (!await repositoryRootIsStable(repository)) {
+      return undefined;
+    }
+
+    return repository;
+  } catch {
+    return undefined;
+  }
+}
+
+async function openedFileMatchesPath(
+  repository: SecureRepository,
+  filePath: string,
+  openedStat: Stats,
+): Promise<boolean> {
+  try {
+    const pathStat = await fs.lstat(filePath);
+    if (
+      pathStat.isSymbolicLink() ||
+      !isSafeFileStat(pathStat) ||
+      !sameFileIdentity(openedStat, pathStat)
+    ) {
+      return false;
+    }
+
+    const resolvedPath = await fs.realpath(filePath);
+    if (
+      !samePath(filePath, resolvedPath) ||
+      !isContainedPath(repository.realRootPath, resolvedPath)
+    ) {
+      return false;
+    }
+
+    const resolvedStat = await fs.stat(resolvedPath);
+    return (
+      isSafeFileStat(resolvedStat) &&
+      sameFileIdentity(openedStat, resolvedStat)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function readSecureRepositoryFile(
+  repository: SecureRepository,
+  filename: string,
+): Promise<string | undefined> {
+  if (
+    path.basename(filename) !== filename ||
+    filename === "." ||
+    filename === ".."
+  ) {
+    return undefined;
+  }
+
+  const filePath = path.resolve(repository.realRootPath, filename);
+  if (!isContainedPath(repository.realRootPath, filePath)) {
+    return undefined;
+  }
+
+  let fileHandle: FileHandle | undefined;
+  try {
+    if (!await repositoryRootIsStable(repository)) {
+      return undefined;
+    }
+
+    const noFollowFlag = fsConstants.O_NOFOLLOW ?? 0;
+    fileHandle = await fs.open(
+      filePath,
+      fsConstants.O_RDONLY | noFollowFlag,
+    );
+    const openedStat = await fileHandle.stat();
+    if (
+      !isSafeFileStat(openedStat) ||
+      !await repositoryRootIsStable(repository) ||
+      !await openedFileMatchesPath(repository, filePath, openedStat)
+    ) {
+      return undefined;
+    }
+
+    const content = await fileHandle.readFile({ encoding: "utf8" });
+    const afterReadStat = await fileHandle.stat();
+    if (
+      !unchangedDuringRead(openedStat, afterReadStat) ||
+      !await repositoryRootIsStable(repository) ||
+      !await openedFileMatchesPath(repository, filePath, afterReadStat)
+    ) {
+      return undefined;
+    }
+
+    return content;
+  } catch {
+    return undefined;
+  } finally {
+    if (fileHandle) {
+      await fileHandle.close().catch(() => undefined);
+    }
+  }
+}
+
 export async function detectLicense(repoPath: string): Promise<LicenseInfo> {
+  const repository = await openSecureRepository(repoPath);
+  if (!repository) {
+    return {
+      detected: false,
+      name: null,
+      spdxId: null,
+      permissive: false,
+      file: null,
+    };
+  }
+
   // Try to find and read a license file
   for (const filename of LICENSE_FILES) {
-    const licensePath = path.join(repoPath, filename);
-    try {
-      const content = await fs.readFile(licensePath, "utf-8");
+    const content = await readSecureRepositoryFile(repository, filename);
+    if (content !== undefined) {
       const result = identifyLicense(content);
-      
+
       if (result.detected) {
         return {
           ...result,
           file: filename,
         };
       }
-      
+
       // File exists but license not recognized
       return {
         detected: true,
@@ -84,47 +305,47 @@ export async function detectLicense(repoPath: string): Promise<LicenseInfo> {
         permissive: false,
         file: filename,
       };
-    } catch {
-      // File doesn't exist, continue
     }
   }
 
   // Check package.json for license field
   try {
-    const packageJsonPath = path.join(repoPath, "package.json");
-    const content = await fs.readFile(packageJsonPath, "utf-8");
-    const pkg = JSON.parse(content);
-    
-    if (pkg.license) {
-      const spdxId = pkg.license;
-      const isPermissive = Object.keys(PERMISSIVE_LICENSES).some(
-        (key) => key.toLowerCase() === spdxId.toLowerCase()
-      );
-      
-      return {
-        detected: true,
-        name: spdxId,
-        spdxId: spdxId,
-        permissive: isPermissive,
-        file: "package.json",
-      };
+    const content = await readSecureRepositoryFile(
+      repository,
+      "package.json",
+    );
+    if (content !== undefined) {
+      const pkg = JSON.parse(content);
+
+      if (pkg.license) {
+        const spdxId = pkg.license;
+        const isPermissive = Object.keys(PERMISSIVE_LICENSES).some(
+          (key) => key.toLowerCase() === spdxId.toLowerCase()
+        );
+
+        return {
+          detected: true,
+          name: spdxId,
+          spdxId: spdxId,
+          permissive: isPermissive,
+          file: "package.json",
+        };
+      }
     }
   } catch {
     // No package.json or invalid
   }
 
   // Check pyproject.toml for license
-  try {
-    const pyprojectPath = path.join(repoPath, "pyproject.toml");
-    const content = await fs.readFile(pyprojectPath, "utf-8");
-    
+  const content = await readSecureRepositoryFile(repository, "pyproject.toml");
+  if (content !== undefined) {
     const licenseMatch = content.match(/license\s*=\s*["{]([^"}]+)["}]/i);
     if (licenseMatch) {
       const licenseName = licenseMatch[1].trim();
       const isPermissive = Object.keys(PERMISSIVE_LICENSES).some(
         (key) => key.toLowerCase() === licenseName.toLowerCase()
       );
-      
+
       return {
         detected: true,
         name: licenseName,
@@ -133,8 +354,6 @@ export async function detectLicense(repoPath: string): Promise<LicenseInfo> {
         file: "pyproject.toml",
       };
     }
-  } catch {
-    // No pyproject.toml or invalid
   }
 
   // No license found
