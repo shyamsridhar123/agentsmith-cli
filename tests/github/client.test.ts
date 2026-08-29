@@ -33,6 +33,7 @@ import {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.useRealTimers();
 });
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,99 @@ describe("GitHubClient.getRepoInfo", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GitHubClient — revision and license
+// ---------------------------------------------------------------------------
+
+describe("GitHubClient.resolveRevision", () => {
+  it("resolves the default branch to an immutable commit SHA", async () => {
+    execFileMock
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({ default_branch: "main" }),
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({ sha: "0123456789abcdef" }),
+      });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.resolveRevision()).resolves.toBe("0123456789abcdef");
+
+    expect(execFileMock).toHaveBeenNthCalledWith(
+      2,
+      "gh",
+      ["api", "repos/test/repo/commits/main"],
+      expect.any(Object),
+    );
+  });
+
+  it("URL-encodes a supplied ref as one path component", async () => {
+    execFileMock.mockResolvedValue({
+      stdout: JSON.stringify({ sha: "fedcba9876543210" }),
+    });
+
+    const client = new GitHubClient("test/repo");
+    await client.resolveRevision("feature/a?b#c%done");
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "gh",
+      [
+        "api",
+        "repos/test/repo/commits/feature%2Fa%3Fb%23c%25done",
+      ],
+      expect.any(Object),
+    );
+  });
+
+  it("rejects a commit response without a SHA", async () => {
+    execFileMock.mockResolvedValue({ stdout: JSON.stringify({}) });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.resolveRevision("main")).rejects.toThrow(
+      "no commit SHA",
+    );
+  });
+});
+
+describe("GitHubClient.getLicense", () => {
+  it("reads the license from a pinned revision", async () => {
+    execFileMock.mockResolvedValue({
+      stdout: JSON.stringify({ license: { spdx_id: "Apache-2.0" } }),
+    });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.getLicense("abc123")).resolves.toBe("Apache-2.0");
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "gh",
+      ["api", "repos/test/repo/license?ref=abc123"],
+      expect.any(Object),
+    );
+  });
+
+  it("returns undefined when GitHub reports no license", async () => {
+    execFileMock.mockRejectedValue({
+      message: "gh: Not Found (HTTP 404)",
+      stderr: "gh: Not Found (HTTP 404)",
+    });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.getLicense("abc123")).resolves.toBeUndefined();
+  });
+
+  it("does not hide non-404 license errors", async () => {
+    execFileMock.mockRejectedValue({
+      message: "gh: Internal Server Error (HTTP 500)",
+      stderr: "server error",
+    });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.getLicense("abc123")).rejects.toMatchObject({
+      name: "GitHubApiError",
+      statusCode: 500,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GitHubClient — getTree
 // ---------------------------------------------------------------------------
 
@@ -161,6 +255,39 @@ describe("GitHubClient.getTree", () => {
     // Should only call once (for tree), not twice (no getRepoInfo)
     expect(execFileMock).toHaveBeenCalledTimes(1);
   });
+
+  it("URL-encodes refs containing slashes and reserved characters", async () => {
+    execFileMock.mockResolvedValue({
+      stdout: JSON.stringify({ tree: [] }),
+    });
+
+    const client = new GitHubClient("test/repo");
+    await client.getTree("feature/a?b#c%done");
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "gh",
+      [
+        "api",
+        "repos/test/repo/git/trees/feature%2Fa%3Fb%23c%25done?recursive=1",
+      ],
+      expect.any(Object),
+    );
+  });
+
+  it("rejects truncated recursive trees", async () => {
+    execFileMock.mockResolvedValue({
+      stdout: JSON.stringify({
+        truncated: true,
+        tree: [{ path: "src/index.ts", type: "blob", size: 100, sha: "abc" }],
+      }),
+    });
+
+    const client = new GitHubClient("test/repo");
+
+    await expect(client.getTree("main")).rejects.toThrow(
+      "truncated recursive tree",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -189,12 +316,124 @@ describe("GitHubClient.getFileContent", () => {
     expect(content).toBe("raw text");
   });
 
-  it("returns empty string on error", async () => {
+  it("URL-encodes content path segments and the pinned ref", async () => {
+    execFileMock.mockResolvedValue({
+      stdout: JSON.stringify({ content: "ok", encoding: "utf-8" }),
+    });
+
+    const client = new GitHubClient("test/repo");
+    await client.getFileContent(
+      "docs/a?b#c%done/read me.md",
+      "feature/a?b#c%done",
+    );
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "gh",
+      [
+        "api",
+        "repos/test/repo/contents/docs/a%3Fb%23c%25done/read%20me.md?ref=feature%2Fa%3Fb%23c%25done",
+      ],
+      expect.any(Object),
+    );
+  });
+
+  it("surfaces content fetch errors with the failed path", async () => {
     execFileMock.mockRejectedValue(new Error("Not found"));
 
     const client = new GitHubClient("test/repo");
-    const content = await client.getFileContent("missing.txt");
-    expect(content).toBe("");
+    await expect(client.getFileContent("missing.txt")).rejects.toThrow(
+      "Failed to fetch missing.txt",
+    );
+  });
+
+  it("preserves legitimate empty file content", async () => {
+    execFileMock.mockResolvedValue({
+      stdout: JSON.stringify({ content: "", encoding: "utf-8" }),
+    });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.getFileContent("empty.txt")).resolves.toBe("");
+  });
+
+  it("surfaces authentication failures when fetching content", async () => {
+    execFileMock.mockRejectedValue({
+      message: "401 Unauthorized",
+      stderr: "gh: auth login required",
+    });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.getFileContent("private.txt")).rejects.toThrow(
+      AuthenticationError,
+    );
+  });
+
+  it("surfaces rate-limit failures when fetching content", async () => {
+    vi.useFakeTimers();
+    execFileMock.mockRejectedValue({
+      message: "403 API rate limit exceeded",
+      stderr: "rate limit exceeded",
+    });
+
+    const client = new GitHubClient("test/repo");
+    const rejection = expect(client.getFileContent("limited.txt")).rejects.toThrow(
+      RateLimitError,
+    );
+    await vi.runAllTimersAsync();
+    await rejection;
+  });
+
+  it("surfaces malformed content responses", async () => {
+    execFileMock.mockResolvedValue({
+      stdout: JSON.stringify({ encoding: "base64" }),
+    });
+
+    const client = new GitHubClient("test/repo");
+    await expect(client.getFileContent("broken.txt")).rejects.toThrow(
+      "no base64 content",
+    );
+  });
+});
+
+describe("GitHubClient.getFiles", () => {
+  it("uses the same immutable revision for every requested file", async () => {
+    execFileMock
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({ content: "one", encoding: "utf-8" }),
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({ content: "two", encoding: "utf-8" }),
+      });
+
+    const client = new GitHubClient("test/repo");
+    const files = await client.getFiles(
+      ["src/one.ts", "src/two.ts"],
+      "0123456789abcdef",
+    );
+
+    expect(files).toEqual(
+      new Map([
+        ["src/one.ts", "one"],
+        ["src/two.ts", "two"],
+      ]),
+    );
+    expect(execFileMock).toHaveBeenNthCalledWith(
+      1,
+      "gh",
+      [
+        "api",
+        "repos/test/repo/contents/src/one.ts?ref=0123456789abcdef",
+      ],
+      expect.any(Object),
+    );
+    expect(execFileMock).toHaveBeenNthCalledWith(
+      2,
+      "gh",
+      [
+        "api",
+        "repos/test/repo/contents/src/two.ts?ref=0123456789abcdef",
+      ],
+      expect.any(Object),
+    );
   });
 });
 
@@ -224,6 +463,7 @@ describe("GitHubClient — error handling", () => {
   });
 
   it("throws RateLimitError after max retries on 429", async () => {
+    vi.useFakeTimers();
     // All attempts fail with rate limit
     execFileMock.mockRejectedValue({
       message: "429 Too Many Requests",
@@ -231,7 +471,9 @@ describe("GitHubClient — error handling", () => {
     });
 
     const client = new GitHubClient("test/repo");
-    await expect(client.getRepoInfo()).rejects.toThrow(RateLimitError);
+    const rejection = expect(client.getRepoInfo()).rejects.toThrow(RateLimitError);
+    await vi.runAllTimersAsync();
+    await rejection;
   });
 
   it("throws GitHubApiError on other errors", async () => {

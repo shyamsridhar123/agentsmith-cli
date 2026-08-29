@@ -63,6 +63,7 @@ program
   .option("--no-instructions", "Skip generation of .github/copilot-instructions.md")
   .option("--single-agent", "Generate a single agent.md instead of multi-agent constellation (v0.3 compat)")
   .option("--no-cache", "Disable the analysis cache")
+  .option("--run-hooks", "Execute post-generate hooks created by this run (disabled by default)")
   .option("--hub <url>", "AgentHub server URL for coordination-aware generation")
   .option("--record", "Record this run to AgentHub (requires --hub)")
   .addHelpText("after", `
@@ -73,6 +74,7 @@ ${chalk.bold("Examples:")}
   $ agentsmith assimilate . --dry-run                            # Preview mode
   $ agentsmith assimilate . -o ./output                          # Custom output
   $ agentsmith assimilate . --single-agent                       # Single agent (v0.3 compat)
+  $ agentsmith assimilate . --run-hooks                          # Explicitly execute post-generate hooks
 
 ${chalk.bold("Generated assets:")}
   .github/copilot-instructions.md  - Workspace-wide Copilot instructions

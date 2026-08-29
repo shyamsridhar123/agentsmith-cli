@@ -1,94 +1,120 @@
 import path from "path";
-import fs from "fs/promises";
-import type { ScanResult } from "../scanner/index.js";
+import {
+  CLI_METADATA_FILES,
+  createRepositorySnapshot,
+  detectCLIFrameworkAndEntrypoints,
+  isCLIImplementationPath,
+  normalizeRepositoryPath,
+  selectCLIImplementationFiles,
+  type RepositorySnapshot,
+  type ScanResult,
+} from "../scanner/index.js";
 import type {
   CLICommandDefinition,
-  CLIOptionDefinition,
   CLIStructure,
   SkillDefinition,
 } from "./types.js";
+import { extractCLICommands } from "./cli-extractors.js";
 
-const SOURCE_EXTENSIONS = /\.(?:ts|tsx|js|jsx|py|go)$/;
+const MAX_CLI_METADATA_BYTES = 512 * 1024;
+const MAX_CLI_SOURCE_BYTES = 256 * 1024;
+const MAX_CLI_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
 function normalized(filePath: string): string {
-  return filePath.replace(/\\/g, "/");
+  return normalizeRepositoryPath(filePath);
 }
 
-function commandNameFromPath(filePath: string): string {
-  const withoutExtension = path.posix.basename(normalized(filePath)).replace(SOURCE_EXTENSIONS, "");
-  return withoutExtension === "index" || withoutExtension === "main"
-    ? path.posix.basename(path.posix.dirname(normalized(filePath)))
-    : withoutExtension;
+export function buildCLITextByteLimits(
+  scanResult: ScanResult,
+): ReadonlyMap<string, number> {
+  const files = new Map(
+    scanResult.files.map((file) => [
+      normalized(file.relativePath),
+      file,
+    ]),
+  );
+  const entryFiles = scanResult.cliEntryFiles
+    .map(normalized)
+    .filter((file) => files.has(file));
+  const implementationFiles = selectCLIImplementationFiles(
+    files.keys(),
+    entryFiles,
+  );
+  const candidates = Array.from(new Set([
+    ...CLI_METADATA_FILES.filter((file) => files.has(file)),
+    ...entryFiles,
+    ...implementationFiles,
+  ]));
+  const limits = new Map<string, number>();
+  let remaining = MAX_CLI_SNAPSHOT_BYTES;
+
+  for (const filePath of candidates) {
+    if (remaining <= 0) break;
+    const maximum = (CLI_METADATA_FILES as readonly string[]).includes(filePath)
+      ? MAX_CLI_METADATA_BYTES
+      : MAX_CLI_SOURCE_BYTES;
+    const limit = Math.min(
+      maximum,
+      Math.max(0, files.get(filePath)?.size ?? maximum),
+      remaining,
+    );
+    limits.set(filePath, limit);
+    remaining -= limit;
+  }
+  return limits;
 }
 
-function extractOptions(content: string): CLIOptionDefinition[] {
-  const options = new Map<string, CLIOptionDefinition>();
-  const patterns = [
-    /\.option\(\s*["'`]([^"'`]+)["'`]\s*(?:,\s*["'`]([^"'`]*)["'`])?/g,
-    /(?:click|typer)\.option\(\s*["'`]([^"'`]+)["'`]/g,
-    /\.(?:String|Bool|Int|StringP|BoolP|IntP)\(\s*["'`]([^"'`]+)["'`]\s*(?:,\s*["'`]([^"'`]*)["'`])?/g,
-    /add_argument\(\s*["'`]([^"'`]+)["'`]/g,
-  ];
-
-  for (const pattern of patterns) {
-    for (const match of content.matchAll(pattern)) {
-      const declaration = match[1];
-      const names = declaration.split(/[,\s|]+/).filter((part) => part.startsWith("-"));
-      const long = names.find((part) => part.startsWith("--"))?.replace(/^--/, "");
-      const short = names.find((part) => /^-[^-]/.test(part))?.replace(/^-/, "");
-      const fallback = declaration.replace(/^-+/, "").split(/[ <[]/)[0];
-      const name = long || fallback;
-      if (!name) continue;
-      options.set(name, {
-        name,
-        short,
-        description: match[2] || undefined,
-        required: /[<{][^}>]+[}>]/.test(declaration),
-      });
+export async function analyzeCLIStructure(
+  scanResult: ScanResult,
+  repositorySnapshot?: RepositorySnapshot,
+): Promise<CLIStructure | undefined> {
+  const snapshot = repositorySnapshot ?? await createRepositorySnapshot(
+    scanResult.rootPath,
+    scanResult.files.map((file) => file.relativePath),
+    {
+      computeDigests: false,
+      textByteLimits: buildCLITextByteLimits(scanResult),
+    },
+  );
+  const availablePaths = scanResult.files
+    .map((file) => normalized(file.relativePath))
+    .filter((file) => snapshot.files.has(file));
+  const allContents = new Map<string, string>();
+  for (const [relativePath, file] of snapshot.files) {
+    if (file.text !== undefined) {
+      allContents.set(relativePath, file.text);
     }
   }
+  const detected = detectCLIFrameworkAndEntrypoints(
+    availablePaths,
+    allContents,
+  );
+  const framework = detected.framework ?? scanResult.cliFramework ?? undefined;
+  if (!framework) return undefined;
+  const entryFiles = detected.entryFiles.length > 0
+    ? detected.entryFiles
+    : scanResult.cliEntryFiles
+      .map(normalized)
+      .filter((file) => snapshot.files.has(file));
 
-  return Array.from(options.values());
-}
-
-function extractDeclaredCommands(content: string): string[] {
-  const names = new Set<string>();
-  const patterns = [
-    /\.command\(\s*["'`]([^"'`\s<[\]]+)/g,
-    /(?:use|Use)\s*:\s*["'`]([^"'`\s]+)/g,
-    /@(?:\w+\.)?command\(\s*(?:name\s*=\s*)?["'`]([^"'`]+)["'`]/g,
-    /add_parser\(\s*["'`]([^"'`]+)["'`]/g,
-  ];
-  for (const pattern of patterns) {
-    for (const match of content.matchAll(pattern)) names.add(match[1]);
-  }
-  return Array.from(names);
-}
-
-export async function analyzeCLIStructure(scanResult: ScanResult): Promise<CLIStructure | undefined> {
-  if (!scanResult.cliFramework) return undefined;
-
-  const likelyCommandFiles = scanResult.files.filter((file) => {
-    const relative = normalized(file.relativePath);
-    return SOURCE_EXTENSIONS.test(relative) && (
-      scanResult.cliEntryFiles.includes(relative) ||
-      /(^|\/)(commands|cmd|cli)\//.test(relative) ||
-      /(^|\/)(cli|main|index)\.(ts|tsx|js|jsx|py|go)$/.test(relative)
-    );
-  });
+  const likelyPaths = new Set(selectCLIImplementationFiles(
+    availablePaths,
+    entryFiles,
+  ));
+  const likelyCommandFiles = scanResult.files.filter((file) =>
+    !file.isTest && likelyPaths.has(normalized(file.relativePath))
+  );
 
   const contents = new Map<string, string>();
   for (const file of likelyCommandFiles.slice(0, 100)) {
-    try {
-      contents.set(normalized(file.relativePath), await fs.readFile(file.path, "utf-8"));
-    } catch {
-      // Skip unreadable source files.
-    }
+    const relativePath = normalized(file.relativePath);
+    const content = snapshot.files.get(relativePath)?.text;
+    if (content !== undefined) contents.set(relativePath, content);
   }
 
   return analyzeCLIContents(
-    scanResult.cliFramework,
-    scanResult.cliEntryFiles,
+    framework,
+    entryFiles,
     scanResult.testFiles,
     contents,
   );
@@ -102,21 +128,15 @@ export function analyzeCLIContents(
 ): CLIStructure {
   const commands: CLICommandDefinition[] = [];
   for (const [file, content] of contents) {
-    if (!SOURCE_EXTENSIONS.test(normalized(file))) continue;
-    const declared = extractDeclaredCommands(content);
-    const names = declared.length > 0 ? declared : [commandNameFromPath(file)];
-    for (const name of names) {
-      if (!name || name === "." || name === "src") continue;
-      commands.push({ name, file: normalized(file), options: extractOptions(content) });
-    }
+    const normalizedFile = normalized(file);
+    if (!isCLIImplementationPath(normalizedFile)) continue;
+    commands.push(...extractCLICommands(framework, normalizedFile, content));
   }
   const uniqueCommands = Array.from(
     new Map(commands.map((command) => [`${command.name}:${command.file}`, command])).values(),
   );
   const extensionPoints = Array.from(new Set(
-    Array.from(contents.keys())
-      .filter((file) => SOURCE_EXTENSIONS.test(normalized(file)))
-      .map((file) => path.posix.dirname(normalized(file))),
+    uniqueCommands.map((command) => path.posix.dirname(command.file)),
   )).filter((dir) => dir !== ".");
 
   return {

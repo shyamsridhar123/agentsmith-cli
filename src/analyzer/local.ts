@@ -4,10 +4,16 @@
  * "The best thing about being me... there are so many of me."
  */
 
-import { CopilotClient, approveAll } from "@github/copilot-sdk";
-import fs from "fs/promises";
+import { CopilotClient } from "@github/copilot-sdk";
 import path from "path";
-import type { ScanResult } from "../scanner/index.js";
+import {
+  createRepositorySnapshot,
+  isGeneratedRepositoryPath,
+  isSensitiveRepositoryPath,
+  normalizeRepositoryPath,
+  type RepositorySnapshot,
+  type ScanResult,
+} from "../scanner/index.js";
 import type { AnalysisResult, SkillDefinition, ToolDefinition, AgentDefinition } from "./types.js";
 import {
   flattenAgents,
@@ -20,7 +26,59 @@ import {
   parseAnalysisResponse,
   generateDefaultSkills,
 } from "./core.js";
-import { analyzeCLIStructure, generateCLISkills, mergeCLISkills } from "./cli.js";
+import {
+  analyzeCLIStructure,
+  buildCLITextByteLimits,
+  generateCLISkills,
+  mergeCLISkills,
+} from "./cli.js";
+import { createSecureAnalysisSessionConfig } from "./session-security.js";
+
+const MAX_FILE_SAMPLES = 20;
+const MAX_SAMPLE_BYTES = 10_000;
+
+export function selectLocalAnalysisSamplePaths(
+  scanResult: ScanResult,
+): string[] {
+  return scanResult.files
+    .filter((file) =>
+      !file.isTest &&
+      !isSensitiveRepositoryPath(file.relativePath) &&
+      !isGeneratedRepositoryPath(file.relativePath)
+    )
+    .sort((left, right) => {
+      if (left.isConfig && !right.isConfig) return -1;
+      if (!left.isConfig && right.isConfig) return 1;
+      const leftDepth = normalizeRepositoryPath(left.relativePath).split("/").length;
+      const rightDepth = normalizeRepositoryPath(right.relativePath).split("/").length;
+      return leftDepth - rightDepth ||
+        left.relativePath.localeCompare(right.relativePath);
+    })
+    .slice(0, MAX_FILE_SAMPLES)
+    .map((file) => normalizeRepositoryPath(file.relativePath));
+}
+
+export async function createLocalAnalysisSnapshot(
+  scanResult: ScanResult,
+  computeDigests = true,
+): Promise<RepositorySnapshot> {
+  const textByteLimits = new Map(buildCLITextByteLimits(scanResult));
+  for (const relativePath of selectLocalAnalysisSamplePaths(scanResult)) {
+    textByteLimits.set(
+      relativePath,
+      Math.max(textByteLimits.get(relativePath) ?? 0, MAX_SAMPLE_BYTES),
+    );
+  }
+
+  return createRepositorySnapshot(
+    scanResult.rootPath,
+    scanResult.files.map((file) => file.relativePath),
+    {
+      computeDigests,
+      textByteLimits,
+    },
+  );
+}
 
 export class Analyzer {
   private verbose: boolean;
@@ -30,8 +88,17 @@ export class Analyzer {
     this.verbose = verbose;
   }
 
-  async analyze(scanResult: ScanResult): Promise<AnalysisResult> {
-    const cli = await analyzeCLIStructure(scanResult);
+  async analyze(
+    scanResult: ScanResult,
+    repositorySnapshot?: RepositorySnapshot,
+  ): Promise<AnalysisResult> {
+    const snapshot = repositorySnapshot ??
+      await createLocalAnalysisSnapshot(scanResult);
+    const analyzedScanResult = restrictScanResultToSnapshot(
+      scanResult,
+      snapshot,
+    );
+    const cli = await analyzeCLIStructure(analyzedScanResult, snapshot);
     // Initialize Copilot SDK
     if (this.verbose) {
       console.log("  [SDK] Initializing CopilotClient...");
@@ -52,7 +119,7 @@ export class Analyzer {
       console.error("  [SDK] Failed to start client:", (error as Error).message);
       console.error("  [SDK] Make sure Copilot CLI is installed and in PATH");
       console.error("  [SDK] Falling back to heuristic analysis...\n");
-      return this.generateFallbackAnalysis(scanResult, cli);
+      return this.generateFallbackAnalysis(analyzedScanResult, cli);
     }
 
     if (this.verbose) {
@@ -65,16 +132,15 @@ export class Analyzer {
       }
 
       // Detect potential domain boundaries for system prompt
-      const domains = detectDomainBoundaries(scanResult.files, path.sep);
+      const domains = detectDomainBoundaries(analyzedScanResult.files, path.sep);
 
       // Create a session with custom tools for analysis
       const session = await this.client.createSession({
         model: "gpt-5",
         streaming: true,
-        systemMessage: {
-          content: getSystemPrompt(scanResult.language, domains),
-        },
-        onPermissionRequest: approveAll,
+        ...createSecureAnalysisSessionConfig(
+          getSystemPrompt(analyzedScanResult.language, domains),
+        ),
       });
       sessionId = session.sessionId;
 
@@ -83,24 +149,38 @@ export class Analyzer {
       }
 
       // Prepare file samples for analysis
-      const samples = await this.gatherFileSamples(scanResult);
+      const samples = await this.gatherFileSamples(
+        analyzedScanResult,
+        snapshot,
+      );
 
       if (this.verbose) {
         console.log(`  [SDK] Gathered ${samples.size} file samples`);
       }
 
       // Build the analysis prompt
-      const fileList = scanResult.files.slice(0, 100).map((f) => f.relativePath).join("\n");
+      const fileList = analyzedScanResult.files
+        .filter((file) =>
+          !file.isTest &&
+          !isSensitiveRepositoryPath(file.relativePath) &&
+          !isGeneratedRepositoryPath(file.relativePath)
+        )
+        .slice(0, 100)
+        .map((file) => file.relativePath)
+        .join("\n");
       let sampleContent = "";
       for (const [filePath, content] of samples) {
         sampleContent += `\n--- ${filePath} ---\n${content}\n`;
       }
 
       const analysisPrompt = buildAnalysisPrompt(
-        scanResult.language,
-        scanResult.framework,
-        scanResult.sourceDirectories,
-        scanResult.configFiles,
+        analyzedScanResult.language,
+        analyzedScanResult.framework,
+        analyzedScanResult.sourceDirectories,
+        analyzedScanResult.configFiles.filter((file) =>
+          !isSensitiveRepositoryPath(file) &&
+          !isGeneratedRepositoryPath(file)
+        ),
         fileList,
         sampleContent,
       );
@@ -111,9 +191,17 @@ export class Analyzer {
 
       let responseContent = "";
       let eventCount = 0;
+      let responseTimeout: ReturnType<typeof setTimeout> | undefined;
+      const clearResponseTimeout = () => {
+        if (responseTimeout !== undefined) {
+          clearTimeout(responseTimeout);
+          responseTimeout = undefined;
+        }
+      };
 
       const done = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
+        responseTimeout = setTimeout(() => {
+          responseTimeout = undefined;
           console.error(`\n  [SDK] Timeout after 120s. Events received: ${eventCount}`);
           reject(new Error("SDK timeout"));
         }, 120000);
@@ -132,43 +220,52 @@ export class Analyzer {
             if (this.verbose) {
               console.log(`  [SDK] Got final message (${responseContent.length} chars)`);
             }
+            clearResponseTimeout();
+            resolve();
           } else if (eventType === "assistant.message_delta") {
             process.stdout.write((eventData.deltaContent as string) || "");
           } else if (eventType === "session.idle") {
-            clearTimeout(timeout);
+            clearResponseTimeout();
             if (this.verbose) {
               console.log(`  [SDK] Session idle. Total events: ${eventCount}`);
             }
             resolve();
           } else if (eventType === "error") {
-            clearTimeout(timeout);
+            clearResponseTimeout();
             console.error("  [SDK] Error event:", eventData);
             reject(new Error("SDK error event"));
           }
         });
       });
 
-      await session.send({ prompt: analysisPrompt });
+      try {
+        await session.send({ prompt: analysisPrompt });
 
-      if (this.verbose) {
-        console.log("  [SDK] Prompt sent, waiting for response...");
+        if (this.verbose) {
+          console.log("  [SDK] Prompt sent, waiting for response...");
+        }
+
+        await done;
+      } finally {
+        clearResponseTimeout();
       }
-
-      await done;
-
       if (this.verbose) {
         console.log("\n");
       }
 
       // Parse the response
-      const result = this.buildResult(responseContent, scanResult, cli);
+      const result = this.buildResult(
+        responseContent,
+        analyzedScanResult,
+        cli,
+      );
 
       await session.disconnect();
       return result;
     } catch (error) {
       console.error(`\n  [SDK] Error: ${(error as Error).message}`);
       console.error("  [SDK] Falling back to heuristic analysis...\n");
-      return this.generateFallbackAnalysis(scanResult, cli);
+      return this.generateFallbackAnalysis(analyzedScanResult, cli);
     } finally {
       if (this.client) {
         try {
@@ -181,34 +278,19 @@ export class Analyzer {
     }
   }
 
-  private async gatherFileSamples(scanResult: ScanResult): Promise<Map<string, string>> {
+  private async gatherFileSamples(
+    scanResult: ScanResult,
+    repositorySnapshot?: RepositorySnapshot,
+  ): Promise<Map<string, string>> {
+    const snapshot = repositorySnapshot ??
+      await createLocalAnalysisSnapshot(scanResult, false);
     const samples = new Map<string, string>();
-    const maxSamples = 20;
-    const maxFileSize = 10000; // 10KB per file
-
-    // Prioritize: config files, main entry points, key directories
-    const priorityFiles = scanResult.files
-      .filter((f) => !f.isTest)
-      .sort((a, b) => {
-        // Config files first
-        if (a.isConfig && !b.isConfig) return -1;
-        if (!a.isConfig && b.isConfig) return 1;
-
-        // Then by directory depth (shallower = more important)
-        const depthA = a.relativePath.split(path.sep).length;
-        const depthB = b.relativePath.split(path.sep).length;
-        return depthA - depthB;
-      })
-      .slice(0, maxSamples);
-
-    for (const file of priorityFiles) {
-      if (file.size > maxFileSize) continue;
-
-      try {
-        const content = await fs.readFile(file.path, "utf-8");
-        samples.set(file.relativePath, content.slice(0, maxFileSize));
-      } catch {
-        // Skip unreadable files
+    for (const relativePath of selectLocalAnalysisSamplePaths(scanResult)) {
+      const snapshotFile = snapshot.files.get(
+        relativePath,
+      );
+      if (snapshotFile?.text !== undefined) {
+        samples.set(relativePath, snapshotFile.text);
       }
     }
 
@@ -310,4 +392,22 @@ export class Analyzer {
       cli,
     };
   }
+}
+
+function restrictScanResultToSnapshot(
+  scanResult: ScanResult,
+  snapshot: RepositorySnapshot,
+): ScanResult {
+  const hasFile = (filePath: string) =>
+    snapshot.files.has(normalizeRepositoryPath(filePath));
+  const files = scanResult.files.filter((file) => hasFile(file.relativePath));
+
+  return {
+    ...scanResult,
+    rootPath: snapshot.rootPath,
+    files,
+    configFiles: scanResult.configFiles.filter(hasFile),
+    testFiles: scanResult.testFiles.filter(hasFile),
+    cliEntryFiles: scanResult.cliEntryFiles.filter(hasFile),
+  };
 }

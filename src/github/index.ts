@@ -8,6 +8,43 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
+function encodePathComponent(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+function encodeContentPath(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => encodePathComponent(segment))
+    .join("/");
+}
+
+function withRef(endpoint: string, ref?: string): string {
+  return ref === undefined
+    ? endpoint
+    : `${endpoint}?ref=${encodePathComponent(ref)}`;
+}
+
+function parseHttpStatus(message: string): number | undefined {
+  const explicitHttpStatus = message.match(/\bHTTP\s+(\d{3})\b/i);
+  if (explicitHttpStatus) return Number(explicitHttpStatus[1]);
+
+  const status = message.match(/\b([1-5]\d{2})\b/);
+  return status ? Number(status[1]) : undefined;
+}
+
+function parseJson<T>(raw: string, context: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    throw new GitHubApiError(
+      `GitHub returned invalid JSON for ${context}: ${(error as Error).message}`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
@@ -126,7 +163,9 @@ export class GitHubClient {
    * backoff up to MAX_RETRIES times.
    */
   private async api(endpoint: string): Promise<string> {
-    const args = ["api", `repos/${this.owner}/${this.repo}${endpoint}`];
+    const encodedOwner = encodePathComponent(this.owner);
+    const encodedRepo = encodePathComponent(this.repo);
+    const args = ["api", `repos/${encodedOwner}/${encodedRepo}${endpoint}`];
 
     if (this.verbose) {
       console.log(`  [GH] gh ${args.join(" ")}`);
@@ -146,16 +185,7 @@ export class GitHubClient {
         const stderr = (error as { stderr?: string }).stderr ?? "";
         const message = (error as Error).message ?? "";
         const combined = `${stderr} ${message}`;
-
-        // Authentication failure — no point retrying
-        if (
-          combined.includes("auth login") ||
-          combined.includes("401") ||
-          combined.includes("403") ||
-          combined.includes("Not logged in")
-        ) {
-          throw new AuthenticationError();
-        }
+        const statusCode = parseHttpStatus(combined);
 
         // Rate limit — retry with backoff
         if (combined.includes("429") || combined.includes("rate limit")) {
@@ -177,9 +207,21 @@ export class GitHubClient {
           throw new RateLimitError(retryAfter);
         }
 
+        // Authentication failure — no point retrying. Check this after rate
+        // limiting because GitHub can report exhausted quotas with HTTP 403.
+        if (
+          combined.includes("auth login") ||
+          combined.includes("401") ||
+          combined.includes("403") ||
+          combined.includes("Not logged in")
+        ) {
+          throw new AuthenticationError();
+        }
+
         // Any other error — wrap and throw immediately
         throw new GitHubApiError(
           `GitHub API call failed: ${message || stderr}`,
+          statusCode,
         );
       }
     }
@@ -196,7 +238,10 @@ export class GitHubClient {
    * Get repository metadata
    */
   async getRepoInfo(): Promise<GitHubRepo> {
-    const data = JSON.parse(await this.api(""));
+    const data = parseJson<{
+      default_branch: string;
+      license?: { spdx_id?: string } | null;
+    }>(await this.api(""), this.fullName);
     return {
       owner: this.owner,
       repo: this.repo,
@@ -206,20 +251,76 @@ export class GitHubClient {
   }
 
   /**
+   * Resolve a branch, tag, abbreviated SHA, or default branch to an immutable
+   * commit SHA.
+   */
+  async resolveRevision(ref?: string): Promise<string> {
+    const requestedRef = ref ?? (await this.getRepoInfo()).defaultBranch;
+    const data = parseJson<{ sha?: string }>(
+      await this.api(`/commits/${encodePathComponent(requestedRef)}`),
+      `${this.fullName}@${requestedRef}`,
+    );
+
+    if (typeof data.sha !== "string" || data.sha.length === 0) {
+      throw new GitHubApiError(
+        `GitHub returned no commit SHA for ${this.fullName}@${requestedRef}.`,
+      );
+    }
+
+    return data.sha;
+  }
+
+  /**
+   * Get the repository license for the supplied revision.
+   */
+  async getLicense(ref?: string): Promise<string | undefined> {
+    try {
+      const data = parseJson<{
+        license?: { spdx_id?: string } | null;
+      }>(
+        await this.api(withRef("/license", ref)),
+        `${this.fullName} license${ref ? `@${ref}` : ""}`,
+      );
+      return data.license?.spdx_id;
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.statusCode === 404) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Get the file tree (recursive)
    */
-  async getTree(branch?: string): Promise<GitHubFile[]> {
-    const ref = branch || (await this.getRepoInfo()).defaultBranch;
-    const data = JSON.parse(
-      await this.api(`/git/trees/${ref}?recursive=1`),
-    ) as {
+  async getTree(ref?: string): Promise<GitHubFile[]> {
+    const requestedRef = ref ?? (await this.getRepoInfo()).defaultBranch;
+    const data = parseJson<{
+      truncated?: boolean;
       tree: Array<{
         path: string;
         type: "blob" | "tree";
         size?: number;
         sha: string;
       }>;
-    };
+    }>(
+      await this.api(
+        `/git/trees/${encodePathComponent(requestedRef)}?recursive=1`,
+      ),
+      `${this.fullName} tree@${requestedRef}`,
+    );
+
+    if (data.truncated) {
+      throw new GitHubApiError(
+        `GitHub returned a truncated recursive tree for ${this.fullName}@${requestedRef}; ` +
+        "the repository cannot be analyzed completely.",
+      );
+    }
+    if (!Array.isArray(data.tree)) {
+      throw new GitHubApiError(
+        `GitHub returned an invalid tree response for ${this.fullName}@${requestedRef}.`,
+      );
+    }
 
     return data.tree
       .filter((item) => item.type === "blob" || item.type === "tree")
@@ -234,27 +335,53 @@ export class GitHubClient {
   /**
    * Get file content by path
    */
-  async getFileContent(path: string): Promise<string> {
+  async getFileContent(path: string, ref?: string): Promise<string> {
     try {
-      const data = JSON.parse(await this.api(`/contents/${path}`));
+      const data = parseJson<{
+        content?: string;
+        encoding?: string;
+      }>(
+        await this.api(
+          withRef(`/contents/${encodeContentPath(path)}`, ref),
+        ),
+        `${this.fullName}/${path}${ref ? `@${ref}` : ""}`,
+      );
       if (data.encoding === "base64") {
+        if (typeof data.content !== "string") {
+          throw new GitHubApiError(`GitHub returned no base64 content for ${path}.`);
+        }
         return Buffer.from(data.content, "base64").toString("utf-8");
       }
-      return data.content || "";
+      if (typeof data.content === "string") return data.content;
+      throw new GitHubApiError(`GitHub returned no file content for ${path}.`);
     } catch (error) {
       if (this.verbose) {
         console.log(
           `  [GH] Failed to fetch ${path}: ${(error as Error).message}`,
         );
       }
-      return "";
+      if (error instanceof AuthenticationError || error instanceof RateLimitError) {
+        throw error;
+      }
+      if (error instanceof GitHubApiError) {
+        throw new GitHubApiError(
+          `Failed to fetch ${path}: ${error.message}`,
+          error.statusCode,
+        );
+      }
+      throw new GitHubApiError(
+        `Failed to fetch ${path}: ${(error as Error).message}`,
+      );
     }
   }
 
   /**
    * Get multiple files in parallel
    */
-  async getFiles(paths: string[]): Promise<Map<string, string>> {
+  async getFiles(
+    paths: string[],
+    ref?: string,
+  ): Promise<Map<string, string>> {
     const results = new Map<string, string>();
 
     // Fetch in batches of 10 to avoid rate limits
@@ -262,7 +389,7 @@ export class GitHubClient {
     for (let i = 0; i < paths.length; i += batchSize) {
       const batch = paths.slice(i, i + batchSize);
       const contents = await Promise.all(
-        batch.map((p) => this.getFileContent(p)),
+        batch.map((p) => this.getFileContent(p, ref)),
       );
       batch.forEach((p, idx) => results.set(p, contents[idx]));
     }

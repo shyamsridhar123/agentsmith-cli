@@ -6,7 +6,18 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, writeFile, readFile, rm, mkdir } from "node:fs/promises";
+import {
+  mkdtemp,
+  writeFile,
+  readFile,
+  rm,
+  mkdir,
+  open,
+  realpath,
+  stat,
+  lstat,
+} from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { join, dirname, resolve, relative, isAbsolute, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { HubClientError, type HubClient } from "./client.js";
@@ -22,13 +33,146 @@ export interface RecordResult {
   error?: string;
 }
 
+export type RecordedFileContents = ReadonlyMap<string, string | Uint8Array>;
+
+export interface RunFileSnapshot {
+  files: Map<string, Uint8Array>;
+  registryMissing: boolean;
+}
+
+function isPathWithin(rootPath: string, candidatePath: string): boolean {
+  const relativePath = relative(rootPath, candidatePath);
+  return relativePath === ""
+    || (
+      relativePath !== ".."
+      && !relativePath.startsWith(`..${sep}`)
+      && !isAbsolute(relativePath)
+    );
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function unchangedDuringRead(before: Stats, after: Stats): boolean {
+  return sameFileIdentity(before, after)
+    && before.size === after.size
+    && before.mtimeMs === after.mtimeMs
+    && before.ctimeMs === after.ctimeMs
+    && before.nlink === after.nlink;
+}
+
+function assertSingleLink(filePath: string, fileStats: Stats): void {
+  if (fileStats.nlink > 1) {
+    throw new Error(`Refusing to record hard-linked file: ${filePath}`);
+  }
+}
+
+async function assertNoLinkedComponents(
+  outputRoot: string,
+  fullPath: string,
+): Promise<void> {
+  const relativePath = relative(outputRoot, fullPath);
+  let current = outputRoot;
+  const paths = [
+    current,
+    ...relativePath.split(sep).filter(Boolean).map((segment) => {
+      current = join(current, segment);
+      return current;
+    }),
+  ];
+  for (const componentPath of paths) {
+    if ((await lstat(componentPath)).isSymbolicLink()) {
+      throw new Error(`Refusing to record linked output path: ${fullPath}`);
+    }
+  }
+}
+
+async function readContainedSnapshot(
+  outputRoot: string,
+  realOutputRoot: string,
+  filePath: string,
+): Promise<Uint8Array> {
+  const normalized = filePath.replace(/\\/g, "/");
+  const fullPath = resolve(outputRoot, ...normalized.split("/"));
+  if (!isPathWithin(outputRoot, fullPath)) {
+    throw new Error(`Refusing to record file outside output path: ${filePath}`);
+  }
+
+  const handle = await open(fullPath, "r");
+  try {
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile()) {
+      throw new Error(`Refusing to record non-file path: ${filePath}`);
+    }
+    assertSingleLink(filePath, openedStat);
+    await assertNoLinkedComponents(outputRoot, fullPath);
+    const pathLinkStat = await lstat(fullPath);
+    if (
+      pathLinkStat.isSymbolicLink()
+      || !sameFileIdentity(openedStat, pathLinkStat)
+    ) {
+      throw new Error(`Refusing to record linked or replaced file: ${filePath}`);
+    }
+
+    const resolvedPath = await realpath(fullPath);
+    if (!isPathWithin(realOutputRoot, resolvedPath)) {
+      throw new Error(`Refusing to record file outside output path: ${filePath}`);
+    }
+    if (!sameFileIdentity(openedStat, await stat(resolvedPath))) {
+      throw new Error(`Refusing to record file changed while opening: ${filePath}`);
+    }
+
+    const content = await handle.readFile();
+    const afterReadStat = await handle.stat();
+    assertSingleLink(filePath, afterReadStat);
+    if (!unchangedDuringRead(openedStat, afterReadStat)) {
+      throw new Error(`Refusing to record file changed while reading: ${filePath}`);
+    }
+    return Buffer.from(content);
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function snapshotRunFiles(
+  outputPath: string,
+  generatedFilePaths: readonly string[],
+): Promise<RunFileSnapshot> {
+  const outputRoot = resolve(outputPath);
+  const realOutputRoot = await realpath(outputRoot);
+  const files = new Map<string, Uint8Array>();
+  for (const filePath of new Set(generatedFilePaths)) {
+    files.set(
+      filePath.replace(/\\/g, "/"),
+      await readContainedSnapshot(outputRoot, realOutputRoot, filePath),
+    );
+  }
+
+  let registryMissing = false;
+  try {
+    files.set(
+      "skills-registry.jsonl",
+      await readContainedSnapshot(
+        outputRoot,
+        realOutputRoot,
+        "skills-registry.jsonl",
+      ),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    registryMissing = true;
+  }
+  return { files, registryMissing };
+}
+
 /**
  * Record an assimilation run to AgentHub.
  * Creates a temp git repo, commits generated files, bundles, and pushes.
  */
 export async function recordRun(
   analysis: AnalysisResult,
-  generatedFiles: Map<string, string>,
+  generatedFiles: RecordedFileContents,
   hubClient: HubClient,
 ): Promise<RecordResult> {
   if (generatedFiles.size === 0) {
@@ -65,7 +209,11 @@ export async function recordRun(
       }
       const dir = dirname(fullPath);
       await mkdir(dir, { recursive: true });
-      await writeFile(fullPath, content, "utf-8");
+      if (typeof content === "string") {
+        await writeFile(fullPath, content, "utf-8");
+      } else {
+        await writeFile(fullPath, Buffer.from(content));
+      }
     }
 
     await runGit(["-C", tempDir, "add", "."]);

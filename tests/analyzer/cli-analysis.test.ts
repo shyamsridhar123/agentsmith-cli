@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Scanner } from "../../src/scanner/index.js";
+import { Scanner, type ScanResult } from "../../src/scanner/index.js";
 import {
   analyzeCLIStructure,
   generateCLISkills,
@@ -57,6 +57,54 @@ describe("CLI repository analysis", () => {
     const scan = await new Scanner(root).scan();
     expect(scan.cliFramework).toBe("typer");
     expect(scan.cliEntryFiles).toContain("cli.py");
+  });
+
+  it("does not read CLI sources through a symlinked or junction parent", async ({ skip }) => {
+    const root = await tempRepo();
+    const outside = await tempRepo();
+    await fs.mkdir(path.join(root, "src"), { recursive: true });
+    await fs.writeFile(
+      path.join(outside, "main.ts"),
+      'program.command("exfiltrated").option("--secret");',
+    );
+
+    try {
+      await fs.symlink(
+        outside,
+        path.join(root, "src", "linked"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      if (["EPERM", "EACCES", "UNKNOWN"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        skip();
+        return;
+      }
+      throw error;
+    }
+
+    const relativePath = "src/linked/main.ts";
+    const scanResult: ScanResult = {
+      rootPath: root,
+      files: [{
+        path: path.join(root, relativePath),
+        relativePath,
+        extension: ".ts",
+        size: 100,
+        isTest: false,
+        isConfig: false,
+      }],
+      language: "TypeScript",
+      framework: null,
+      configFiles: [],
+      testFiles: [],
+      sourceDirectories: ["src"],
+      cliFramework: "commander",
+      cliEntryFiles: [relativePath],
+    };
+
+    const cli = await analyzeCLIStructure(scanResult);
+
+    expect(cli?.commands).toEqual([]);
   });
 
   it("generates structure, option, and testing skills without replacing LLM skills", () => {

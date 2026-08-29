@@ -1,18 +1,30 @@
 /**
- * Registry - Skills & Agents Database
- * Builds and searches the JSONL index.
+ * Registry - builds and searches the JSONL skills and agents index.
  */
 
-import fs from "fs/promises";
 import path from "path";
-import type { SkillDefinition, AgentDefinition } from "../analyzer/index.js";
 import { z } from "zod";
+import type { SkillDefinition, AgentDefinition } from "../analyzer/index.js";
+import type { GeneratorResult } from "../generator/index.js";
+import { readFreshness } from "../generator/freshness.js";
+import {
+  atomicWriteContainedFile,
+  createContainedRoot,
+  readContainedFile,
+  type ContainedRoot,
+} from "../generator/path-safety.js";
+import {
+  assertRegistryAssetExists,
+  canonicalizeRegistryAssetPath,
+  registryPathKey,
+  type RegistryAssetType,
+} from "./asset-path.js";
 
 export interface RegistryEntry {
   type: "skill" | "agent";
   name: string;
   file: string;
-  vsCodeAgent?: string; // VS Code .agent.md file path
+  vsCodeAgent?: string;
   description: string;
   category?: string;
   triggers: string[];
@@ -34,6 +46,8 @@ export const RegistryEntrySchema = z.object({
   isSubAgent: z.boolean().optional(),
 });
 
+type RegistryBuildAssets = Pick<GeneratorResult, "agentFiles" | "skillFiles">;
+
 function parseEntries(content: string): RegistryEntry[] {
   const entries: RegistryEntry[] = [];
   for (const line of content.trim().split("\n").filter(Boolean)) {
@@ -41,143 +55,205 @@ function parseEntries(content: string): RegistryEntry[] {
       const parsed = RegistryEntrySchema.safeParse(JSON.parse(line));
       if (parsed.success) entries.push(parsed.data);
     } catch {
-      // Ignore malformed registry lines rather than trusting partial data.
+      // Search ignores malformed lines; validate reports them explicitly.
     }
   }
   return entries;
 }
 
-export class Registry {
-  private rootPath: string;
-  private dryRun: boolean;
-  private registryPath: string;
+function assertUniqueEntry(
+  seenNames: Set<string>,
+  seenPaths: Set<string>,
+  type: RegistryAssetType,
+  name: string,
+  file: string,
+): void {
+  const nameKey = `${type}:${name.normalize("NFC").toLowerCase()}`;
+  const pathKey = registryPathKey(file);
+  if (seenNames.has(nameKey)) {
+    throw new Error(`Duplicate ${type} registry name: ${name}`);
+  }
+  if (seenPaths.has(pathKey)) {
+    throw new Error(`Duplicate registry asset path: ${file}`);
+  }
+  seenNames.add(nameKey);
+  seenPaths.add(pathKey);
+}
 
-  constructor(rootPath: string, dryRun = false) {
-    this.rootPath = rootPath;
-    this.dryRun = dryRun;
+export class Registry {
+  private registryPath: string;
+  private containedRoot?: Promise<ContainedRoot>;
+
+  constructor(
+    private rootPath: string,
+    private dryRun = false,
+  ) {
     this.registryPath = path.join(rootPath, "skills-registry.jsonl");
   }
 
-  async build(skills: SkillDefinition[], agents?: AgentDefinition[]): Promise<void> {
+  async build(
+    skills: SkillDefinition[],
+    agents: AgentDefinition[] = [],
+    generated?: RegistryBuildAssets,
+  ): Promise<void> {
+    const assets = generated ?? await this.readGeneratedAssets();
     const entries: RegistryEntry[] = [];
-    
-    // Add skill entries
-    for (const skill of skills) {
+    const seenNames = new Set<string>();
+    const seenPaths = new Set<string>();
+    const generatedAgentNames = new Set(
+      assets.agentFiles.map((agent) => agent.name),
+    );
+
+    for (const generatedSkill of assets.skillFiles) {
+      const skill = skills.find((candidate) => candidate.name === generatedSkill.name);
+      if (!skill) {
+        throw new Error(`Generated skill is missing analysis metadata: ${generatedSkill.name}`);
+      }
+      const file = await this.validateAsset(generatedSkill.file, "skill");
+      assertUniqueEntry(seenNames, seenPaths, "skill", skill.name, file);
       entries.push({
         type: "skill",
         name: skill.name,
-        file: `.github/skills/${skill.name}/SKILL.md`,
+        file,
         description: skill.description,
         category: skill.category,
         triggers: skill.triggers,
       });
     }
 
-    // Add agent entries
-    if (agents) {
-      for (const agent of agents) {
-        entries.push({
-          type: "agent",
-          name: agent.name,
-          file: `.github/agents/${agent.name}.agent.md`,
-          vsCodeAgent: `.github/agents/${agent.name}.agent.md`,
-          description: agent.description,
-          triggers: agent.triggers,
-          isSubAgent: agent.isSubAgent,
-          parentAgent: agent.parentAgent,
-          subAgents: agent.subAgents,
-        });
-      }
+    for (const generatedAgent of assets.agentFiles) {
+      const agent = agents.find((candidate) => candidate.name === generatedAgent.name);
+      const file = await this.validateAsset(generatedAgent.file, "agent");
+      assertUniqueEntry(seenNames, seenPaths, "agent", generatedAgent.name, file);
+      const subAgents = agent?.subAgents?.filter((name) => generatedAgentNames.has(name));
+      const parentAgent = agent?.parentAgent && generatedAgentNames.has(agent.parentAgent)
+        ? agent.parentAgent
+        : undefined;
+      entries.push({
+        type: "agent",
+        name: generatedAgent.name,
+        file,
+        vsCodeAgent: file,
+        description: agent?.description ?? "Generated repository agent",
+        triggers: agent?.triggers ?? [],
+        isSubAgent: generatedAgent.isSubAgent,
+        parentAgent,
+        subAgents: subAgents && subAgents.length > 0 ? subAgents : undefined,
+      });
     }
 
-    const content = entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
-
+    const content = entries.length > 0
+      ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`
+      : "";
     if (!this.dryRun) {
-      await fs.writeFile(this.registryPath, content, "utf-8");
+      await atomicWriteContainedFile(
+        await this.getContainedRoot(),
+        this.registryPath,
+        content,
+      );
     }
   }
 
-  async search(query: string, options?: { type?: "skill" | "agent"; limit?: number }): Promise<RegistryEntry[]> {
-    const limit = options?.limit ?? 10;
-    const typeFilter = options?.type;
-    
-    try {
-      const content = await fs.readFile(this.registryPath, "utf-8");
-      const lines = content.trim().split("\n").filter(Boolean);
-
-      let entries: RegistryEntry[] = parseEntries(lines.join("\n"));
-      
-      // Filter by type if specified
-      if (typeFilter) {
-        entries = entries.filter((e) => e.type === typeFilter);
-      }
-      
-      const queryLower = query.toLowerCase();
-
-      // Score each entry by relevance
-      const scored = entries.map((entry) => {
+  async search(
+    query: string,
+    options?: { type?: "skill" | "agent"; limit?: number },
+  ): Promise<RegistryEntry[]> {
+    let entries = await this.list();
+    if (options?.type) {
+      entries = entries.filter((entry) => entry.type === options.type);
+    }
+    const queryLower = query.toLowerCase();
+    return entries
+      .map((entry) => {
         let score = 0;
-
-        // Exact name match
         if (entry.name.toLowerCase() === queryLower) score += 100;
-
-        // Name contains query
         if (entry.name.toLowerCase().includes(queryLower)) score += 50;
-
-        // Description contains query
         if (entry.description.toLowerCase().includes(queryLower)) score += 30;
-
-        // Triggers contain query
         for (const trigger of entry.triggers) {
           if (trigger.toLowerCase().includes(queryLower)) score += 20;
           if (trigger.toLowerCase() === queryLower) score += 40;
         }
-
-        // Category matches (skills only)
         if (entry.category?.toLowerCase().includes(queryLower)) score += 10;
-
-        // Boost root agents
         if (entry.type === "agent" && !entry.isSubAgent) score += 5;
-
         return { entry, score };
-      });
-
-      // Filter and sort by score
-      return scored
-        .filter((s) => s.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, limit)
-        .map((s) => s.entry);
-    } catch {
-      // Registry doesn't exist or is empty
-      return [];
-    }
+      })
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, options?.limit ?? 10)
+      .map(({ entry }) => entry);
   }
 
   async list(): Promise<RegistryEntry[]> {
     try {
-      const content = await fs.readFile(this.registryPath, "utf-8");
-      return parseEntries(content);
-    } catch {
-      return [];
+      return parseEntries(
+        await readContainedFile(await this.getContainedRoot(), this.registryPath),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
     }
   }
 
   async get(name: string): Promise<RegistryEntry | null> {
-    const entries = await this.list();
-    return entries.find((e) => e.name === name) || null;
+    return (await this.list()).find((entry) => entry.name === name) ?? null;
   }
 
   async upsert(entries: RegistryEntry[]): Promise<void> {
     const existing = await this.list();
-    const merged = new Map(existing.map((entry) => [`${entry.type}:${entry.name}`, entry]));
+    const merged = new Map(
+      existing.map((entry) => [`${entry.type}:${entry.name}`, entry]),
+    );
     for (const entry of entries) {
       const validated = RegistryEntrySchema.parse(entry);
+      validated.file = await this.validateAsset(validated.file, validated.type);
+      if (validated.vsCodeAgent) {
+        validated.vsCodeAgent = await this.validateAsset(
+          validated.vsCodeAgent,
+          "agent",
+        );
+      }
       merged.set(`${validated.type}:${validated.name}`, validated);
     }
     if (!this.dryRun) {
-      const content = Array.from(merged.values()).map((entry) => JSON.stringify(entry)).join("\n");
-      await fs.writeFile(this.registryPath, content ? `${content}\n` : "", "utf-8");
+      const content = Array.from(merged.values())
+        .map((entry) => JSON.stringify(entry))
+        .join("\n");
+      await atomicWriteContainedFile(
+        await this.getContainedRoot(),
+        this.registryPath,
+        content ? `${content}\n` : "",
+      );
     }
+  }
+
+  private getContainedRoot(): Promise<ContainedRoot> {
+    this.containedRoot ??= createContainedRoot(this.rootPath);
+    return this.containedRoot;
+  }
+
+  private async validateAsset(
+    file: string,
+    type: RegistryAssetType,
+  ): Promise<string> {
+    const canonical = canonicalizeRegistryAssetPath(file, type);
+    if (!this.dryRun) {
+      return assertRegistryAssetExists(await this.getContainedRoot(), canonical, type);
+    }
+    return canonical;
+  }
+
+  private async readGeneratedAssets(): Promise<RegistryBuildAssets> {
+    if (this.dryRun) return { agentFiles: [], skillFiles: [] };
+    const metadata = await readFreshness(await this.getContainedRoot());
+    if (!metadata) return { agentFiles: [], skillFiles: [] };
+    const skillFiles = metadata.generatedSkills
+      ?? Object.keys(metadata.skills ?? {}).map((name) => ({
+        name,
+        file: `.github/skills/${name}/SKILL.md`,
+      }));
+    return {
+      agentFiles: metadata.generatedAgents ?? [],
+      skillFiles,
+    };
   }
 }

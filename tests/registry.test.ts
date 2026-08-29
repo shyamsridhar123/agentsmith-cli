@@ -5,22 +5,66 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const pathSafetyMocks = vi.hoisted(() => ({
+  atomicWriteContainedFile: vi.fn(),
+  createContainedRoot: vi.fn(),
+  readContainedFile: vi.fn(),
+  resolveContainedExistingFile: vi.fn(),
+}));
+const freshnessMocks = vi.hoisted(() => ({
+  readFreshness: vi.fn(),
+}));
+
 vi.mock("fs/promises", () => ({
   default: {
+    lstat: vi.fn(),
+    mkdir: vi.fn(),
     readFile: vi.fn(),
+    realpath: vi.fn(),
+    stat: vi.fn(),
     writeFile: vi.fn(),
   },
 }));
+
+vi.mock("../src/generator/path-safety.js", () => pathSafetyMocks);
+vi.mock("../src/generator/freshness.js", () => freshnessMocks);
 
 import fs from "fs/promises";
 import { Registry } from "../src/registry/index.js";
 import type { SkillDefinition, AgentDefinition } from "../src/analyzer/types.js";
 
 const mockReadFile = vi.mocked(fs.readFile);
+const mockLstat = vi.mocked(fs.lstat);
+const mockMkdir = vi.mocked(fs.mkdir);
+const mockRealpath = vi.mocked(fs.realpath);
+const mockStat = vi.mocked(fs.stat);
 const mockWriteFile = vi.mocked(fs.writeFile);
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mockLstat.mockRejectedValue(Object.assign(new Error("missing"), { code: "ENOENT" }));
+  mockMkdir.mockResolvedValue(undefined);
+  mockReadFile.mockRejectedValue(Object.assign(new Error("missing"), { code: "ENOENT" }));
+  mockRealpath.mockImplementation(async (target) => target as string);
+  mockStat.mockResolvedValue({ isDirectory: () => true, isFile: () => true } as any);
+  mockWriteFile.mockResolvedValue(undefined);
+  pathSafetyMocks.createContainedRoot.mockImplementation(async (target: string) => ({
+    requestedRoot: target,
+    realRoot: target,
+  }));
+  pathSafetyMocks.readContainedFile.mockImplementation(async (_root, target: string) =>
+    mockReadFile(target, "utf-8") as Promise<string>
+  );
+  pathSafetyMocks.resolveContainedExistingFile.mockImplementation(
+    async (_root, target: string) => target,
+  );
+  pathSafetyMocks.atomicWriteContainedFile.mockImplementation(
+    async (_root, target: string, content: string) => {
+      await fs.writeFile(target, content, "utf-8");
+      return target;
+    },
+  );
+  freshnessMocks.readFreshness.mockResolvedValue(undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -65,7 +109,14 @@ describe("Registry.build", () => {
     mockWriteFile.mockResolvedValue(undefined);
 
     const registry = new Registry("/project");
-    await registry.build([makeSkill()], [makeAgent()]);
+    await registry.build([makeSkill()], [makeAgent()], {
+      skillFiles: [{ name: "test-skill", file: ".github/skills/test-skill/SKILL.md" }],
+      agentFiles: [{
+        name: "test-agent",
+        file: ".github/agents/test-agent.agent.md",
+        isSubAgent: false,
+      }],
+    });
 
     expect(mockWriteFile).toHaveBeenCalledOnce();
     const writtenContent = mockWriteFile.mock.calls[0][1] as string;
@@ -87,7 +138,10 @@ describe("Registry.build", () => {
     mockWriteFile.mockResolvedValue(undefined);
 
     const registry = new Registry("/project");
-    await registry.build([makeSkill({ name: "only-skill" })]);
+    await registry.build([makeSkill({ name: "only-skill" })], [], {
+      skillFiles: [{ name: "only-skill", file: ".github/skills/only-skill/SKILL.md" }],
+      agentFiles: [],
+    });
 
     const writtenContent = mockWriteFile.mock.calls[0][1] as string;
     const lines = writtenContent.trim().split("\n");
@@ -95,9 +149,20 @@ describe("Registry.build", () => {
     expect(JSON.parse(lines[0]).name).toBe("only-skill");
   });
 
+  it("does not infer entries from analysis when no generated assets exist", async () => {
+    const registry = new Registry("/project");
+    await registry.build([makeSkill()], [makeAgent()]);
+
+    expect(mockWriteFile).toHaveBeenCalledOnce();
+    expect(mockWriteFile.mock.calls[0][1]).toBe("");
+  });
+
   it("does not write files in dry-run mode", async () => {
     const registry = new Registry("/project", true);
-    await registry.build([makeSkill()]);
+    await registry.build([makeSkill()], [], {
+      skillFiles: [{ name: "test-skill", file: ".github/skills/test-skill/SKILL.md" }],
+      agentFiles: [],
+    });
     expect(mockWriteFile).not.toHaveBeenCalled();
   });
 
@@ -110,14 +175,90 @@ describe("Registry.build", () => {
       parentAgent: "root",
       subAgents: ["grandchild"],
     });
+    const root = makeAgent({ name: "root" });
+    const grandchild = makeAgent({
+      name: "grandchild",
+      isSubAgent: true,
+      parentAgent: "child",
+    });
     const registry = new Registry("/project");
-    await registry.build([], [agent]);
+    await registry.build([], [root, agent, grandchild], {
+      skillFiles: [],
+      agentFiles: [
+        { name: "root", file: ".github/agents/root.agent.md", isSubAgent: false },
+        { name: "child", file: ".github/agents/child.agent.md", isSubAgent: true },
+        {
+          name: "grandchild",
+          file: ".github/agents/grandchild.agent.md",
+          isSubAgent: true,
+        },
+      ],
+    });
 
     const writtenContent = mockWriteFile.mock.calls[0][1] as string;
-    const entry = JSON.parse(writtenContent.trim());
+    const entry = writtenContent.trim().split("\n")
+      .map((line) => JSON.parse(line))
+      .find((candidate) => candidate.name === "child");
     expect(entry.isSubAgent).toBe(true);
     expect(entry.parentAgent).toBe("root");
     expect(entry.subAgents).toEqual(["grandchild"]);
+  });
+
+  it("uses exact constellation agent filenames from freshness metadata", async () => {
+    freshnessMocks.readFreshness.mockResolvedValue({
+      generatedAgents: [
+        {
+          name: "root",
+          file: ".github/agents/my-repo-root.agent.md",
+          isSubAgent: false,
+        },
+        {
+          name: "API Agent",
+          file: ".github/agents/api-agent.agent.md",
+          isSubAgent: true,
+        },
+      ],
+    });
+
+    const registry = new Registry("/project");
+    await registry.build([], [
+      makeAgent({ name: "root" }),
+      makeAgent({ name: "API Agent", isSubAgent: true, parentAgent: "root" }),
+    ]);
+
+    const entries = (mockWriteFile.mock.calls[0][1] as string)
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(entries.map((entry) => entry.file)).toEqual([
+      ".github/agents/my-repo-root.agent.md",
+      ".github/agents/api-agent.agent.md",
+    ]);
+  });
+
+  it("indexes only the generated combined agent in single-agent mode", async () => {
+    freshnessMocks.readFreshness.mockResolvedValue({
+      generatedAgents: [
+        {
+          name: "root",
+          file: ".github/agents/my-repo.agent.md",
+          isSubAgent: false,
+        },
+      ],
+    });
+
+    const registry = new Registry("/project");
+    await registry.build([], [
+      makeAgent({ name: "root" }),
+      makeAgent({ name: "child", isSubAgent: true, parentAgent: "root" }),
+    ]);
+
+    const entries = (mockWriteFile.mock.calls[0][1] as string)
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(entries).toHaveLength(1);
+    expect(entries[0].file).toBe(".github/agents/my-repo.agent.md");
   });
 });
 
@@ -202,7 +343,7 @@ describe("Registry.search", () => {
   });
 
   it("returns empty array when registry file is missing", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     const registry = new Registry("/project");
     const results = await registry.search("anything");
     expect(results).toEqual([]);
@@ -237,7 +378,7 @@ describe("Registry.list", () => {
   });
 
   it("returns empty array when registry file is missing", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     const registry = new Registry("/project");
     expect(await registry.list()).toEqual([]);
   });
@@ -278,7 +419,7 @@ describe("Registry.get", () => {
   });
 
   it("returns null when registry is empty", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     const registry = new Registry("/project");
     expect(await registry.get("anything")).toBeNull();
   });

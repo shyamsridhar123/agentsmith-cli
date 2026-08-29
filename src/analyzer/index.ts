@@ -48,7 +48,11 @@ export {
 export type { AnalysisOutput, AgentOutput } from "./schemas.js";
 
 // Re-export analyzers
-export { Analyzer } from "./local.js";
+export {
+  Analyzer,
+  createLocalAnalysisSnapshot,
+  selectLocalAnalysisSamplePaths,
+} from "./local.js";
 export { RemoteAnalyzer } from "./remote.js";
 
 // Import classes for factory function
