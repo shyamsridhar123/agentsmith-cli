@@ -33,6 +33,10 @@ Copilot instructions, hooks, and a searchable registry.
 agentsmith assimilate ./my-cli
 ```
 
+Local repositories are analyzed from a bounded snapshot of the exact source
+content Agent Smith inspected. Public GitHub repositories are pinned to one
+commit so the license, tree, and files all describe the same revision.
+
 <p align="center">
   <img src="public/images/agent-smith.gif" alt="Agent Smith" width="400"/>
 </p>
@@ -52,6 +56,9 @@ goes after the **command surface**.
 | **CLI-focused skills** | Generates `cli-structure`, `cli-options`, and `cli-testing` knowledge with source references. |
 | **Refinement** | Reports missing command knowledge, missing CLI skills, undocumented option surfaces, and absent command-test coverage. |
 | **Freshness** | Regenerates without cache and fingerprints generated skills so stale knowledge is visible. |
+| **Predictable regeneration** | Reconciles Agent Smith-owned agents, skills, hooks, and handoffs while preserving user-authored files. |
+| **Controlled automation** | Generates lifecycle hooks, but runs only the current generation's hooks after an explicit `--run-hooks`. |
+| **Pinned remote analysis** | Reads a GitHub repository's license and source from one immutable commit. |
 
 The result is a Copilot team that can answer practical questions such as:
 
@@ -103,7 +110,13 @@ npx agentsmith assimilate https://github.com/owner/cli-repo
 
 # Preview exactly what Agent Smith would generate
 npx agentsmith assimilate . --dry-run --verbose
+
+# Explicitly run hooks generated during this assimilation
+npx agentsmith assimilate . --run-hooks
 ```
+
+Git-based installation builds the compiled CLI automatically. The installed
+`agentsmith` command runs the packaged JavaScript entrypoint directly.
 
 Then tighten and maintain the generated knowledge:
 
@@ -142,9 +155,13 @@ Useful options:
 --no-cache              Disable analysis caching
 --no-instructions       Skip copilot-instructions.md
 --single-agent          Generate one combined agent
+--run-hooks             Run post-generation hooks created by this run
 --hub <url>             Enable optional AgentHub coordination
 --record                Record the generated run to AgentHub
 ```
+
+Hook execution is opt-in. Without `--run-hooks`, Agent Smith writes the hook
+definitions for review but does not execute them.
 
 ### 2. Refine
 
@@ -168,7 +185,9 @@ agentsmith refresh .
 ```
 
 `refresh` bypasses the analysis cache, regenerates the agent system, and updates
-freshness fingerprints.
+freshness fingerprints. It also removes stale Agent Smith-owned agents, skills,
+hooks, and handoffs that are no longer part of the generated plan while leaving
+user-owned files alone.
 
 ### 4. Search and validate
 
@@ -179,7 +198,8 @@ agentsmith validate --verbose
 ```
 
 The registry gives generated knowledge a queryable surface instead of leaving it
-buried across Markdown files.
+buried across Markdown files. Validation checks that registry entries and agent
+references resolve to the generated asset type they claim to represent.
 
 ## Supported CLI ecosystems
 
@@ -191,6 +211,30 @@ Agent Smith recognizes common command registration and option patterns across:
 
 It also follows conventional `commands/`, `cmd/`, `cli/`, `main`, and entrypoint
 layouts when extracting command files and extension points.
+
+## Analyze unfamiliar repositories with clear boundaries
+
+Agent Smith keeps repository input separate from the operations used to generate
+the Copilot system:
+
+- **Bounded local snapshots:** it streams repository fingerprints and retains
+  only the relevant text selected for analysis instead of loading an entire
+  repository into memory.
+- **Tool-free analysis:** repository content can describe code, but it cannot
+  ask the analysis session to run shell commands, write files, or invoke tools.
+- **Sensitive-path filtering:** credentials, private keys, environment files,
+  generated output, fixtures, and vendor directories are excluded from source
+  sampling.
+- **Pinned GitHub revisions:** remote license checks, file trees, and file
+  contents come from the same commit.
+- **Contained generation:** generated filenames are collision-checked and writes
+  stay inside the selected output root.
+- **Owned-asset cleanup:** refresh removes only previously recorded Agent
+  Smith-owned assets whose ownership metadata still matches.
+
+These boundaries make local folders and public GitHub repositories usable
+through the same workflow without treating repository text as trusted
+instructions.
 
 ## Multi-agent mode
 
@@ -227,6 +271,7 @@ When enabled, Agent Smith can:
 - create collision-safe exploration, result, and review channels;
 - inject concrete coordination instructions into generated agents;
 - record generated assets as real git bundles;
+- record the validated generated snapshot rather than reopening arbitrary paths;
 - fetch previous runs;
 - inspect run history;
 - diff two generations to see how agent knowledge changed.
@@ -259,6 +304,7 @@ updates.
 
 ```text
 agentsmith assimilate <target>              Generate the agent system
+agentsmith assimilate <target> --run-hooks  Generate and run current hooks
 agentsmith refine [path]                    Find CLI knowledge gaps
 agentsmith refresh [path]                   Regenerate without cache
 agentsmith search <query>                   Search agents and skills
