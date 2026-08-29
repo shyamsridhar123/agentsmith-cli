@@ -23,6 +23,7 @@ extension points. Then it generates:
 
 ```bash
 npx agentsmith-cli assimilate https://github.com/owner/repository
+npx agentsmith-cli assimilate ./my-project
 ```
 
 **No preset team. No manual repository map. No clone required for public GitHub
