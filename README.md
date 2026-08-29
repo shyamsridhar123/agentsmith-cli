@@ -7,41 +7,28 @@
 
 > *"The best thing about being me… there are so many of me."*
 
-## Turn any repository into a Copilot-native engineering team
+## Point at any repo. Get a Copilot-native engineering team.
 
-**Point Agent Smith at a codebase—a local folder or a public GitHub URL—and it
-agentifies the repository.** It maps the languages, frameworks, source
-boundaries, entrypoints, tests, tooling, and domain structure, then generates a
-hierarchy of GitHub Copilot agents that know how to work inside that specific
-project.
+**Agent Smith agentifies any repository you can use—local folder or public
+GitHub URL—into a team of Copilot agents built from the actual codebase.**
 
-When the repository contains a CLI, Agent Smith goes deeper: it discovers the
-CLI framework, command registrations, flags, extension points, and
-command-focused tests.
+It maps the architecture, frameworks, domains, entrypoints, tooling, tests, and
+extension points. Then it generates:
 
-This is not a generic repository summary.
-
-It turns the repository into reusable agent knowledge:
-
-- where the major domains and entrypoints live;
-- how the codebase is organized and extended;
-- which files and conventions define each capability;
-- how the project is built, validated, and tested;
-- when present, where CLI commands and options are registered;
-- which specialist agent should own a change.
-
-One command transforms that knowledge into custom agents, skills, handoffs,
-Copilot instructions, hooks, and a searchable registry.
+- **a root orchestrator** that understands the whole repository;
+- **specialist agents** for the domains Agent Smith actually finds;
+- **source-backed skills** that point to real files and patterns;
+- **handoffs and instructions** that tell the team how to work together;
+- **a refreshable knowledge layer** that evolves with the codebase.
 
 ```bash
-agentsmith assimilate ./my-project
+npx agentsmith assimilate https://github.com/owner/repository
 ```
 
-Point it at a folder or URL. Agent Smith handles the rest.
+**No preset team. No manual repository map. No clone required for public GitHub
+repositories.**
 
-Local repositories are analyzed from a bounded snapshot of the exact source
-content Agent Smith inspected. Public GitHub repositories are pinned to one
-commit so the license, tree, and files all describe the same revision.
+Point. Assimilate. Start building with a team that already knows where to look.
 
 <p align="center">
   <img src="public/images/agent-smith.gif" alt="Agent Smith" width="400"/>
