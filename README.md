@@ -7,31 +7,37 @@
 
 > *"The best thing about being me… there are so many of me."*
 
-## Turn a CLI codebase into a Copilot-native engineering team
+## Turn any repository into a Copilot-native engineering team
 
-**Agent Smith reverse-engineers how a CLI is actually built**—its framework,
-entrypoints, command registrations, flags, extension points, source conventions,
-and command-focused tests—then generates a hierarchy of GitHub Copilot agents
-that know how to work inside that CLI.
+**Point Agent Smith at a codebase—a local folder or a public GitHub URL—and it
+agentifies the repository.** It maps the languages, frameworks, source
+boundaries, entrypoints, tests, tooling, and domain structure, then generates a
+hierarchy of GitHub Copilot agents that know how to work inside that specific
+project.
+
+When the repository contains a CLI, Agent Smith goes deeper: it discovers the
+CLI framework, command registrations, flags, extension points, and
+command-focused tests.
 
 This is not a generic repository summary.
 
-It turns the executable surface of your project into reusable agent knowledge:
+It turns the repository into reusable agent knowledge:
 
-- where commands are registered;
-- how options and arguments are named;
-- which files define the public interface;
-- how new commands should be added;
-- which validation and exit-code conventions matter;
-- where command behavior is tested;
+- where the major domains and entrypoints live;
+- how the codebase is organized and extended;
+- which files and conventions define each capability;
+- how the project is built, validated, and tested;
+- when present, where CLI commands and options are registered;
 - which specialist agent should own a change.
 
 One command transforms that knowledge into custom agents, skills, handoffs,
 Copilot instructions, hooks, and a searchable registry.
 
 ```bash
-agentsmith assimilate ./my-cli
+agentsmith assimilate ./my-project
 ```
+
+Point it at a folder or URL. Agent Smith handles the rest.
 
 Local repositories are analyzed from a bounded snapshot of the exact source
 content Agent Smith inspected. Public GitHub repositories are pinned to one
@@ -41,13 +47,18 @@ commit so the license, tree, and files all describe the same revision.
   <img src="public/images/agent-smith.gif" alt="Agent Smith" width="400"/>
 </p>
 
-## Why Agent Smith is CLI-native
+## Agentify any repository
 
-Most agent generators inspect files and produce broad documentation. Agent Smith
-goes after the **command surface**.
+Agent Smith starts with the whole codebase, not a fixed template. The generated
+team follows the repository it finds: backend services, frontend applications,
+data systems, infrastructure, libraries, developer tools, CLIs, or a mixture of
+them.
 
 | Capability | What Agent Smith extracts or generates |
 |---|---|
+| **Any-repository input** | Accepts a local path or public GitHub URL and builds the same agent system without requiring a clone. |
+| **Repository mapping** | Detects languages, frameworks, source directories, tests, configuration, tooling, and domain boundaries. |
+| **Repository-specific team** | Generates a root orchestrator and specialists based on the actual codebase instead of a preset list. |
 | **Framework detection** | Recognizes Commander, Yargs, oclif, Cobra, Click, Typer, and argparse patterns. |
 | **Entrypoint discovery** | Finds the files that bootstrap and register the CLI. |
 | **Command extraction** | Maps registered commands back to their source files. |
@@ -62,11 +73,13 @@ goes after the **command surface**.
 
 The result is a Copilot team that can answer practical questions such as:
 
+- Which part of this repository owns the requested change?
+- Where is this capability implemented and configured?
+- Which existing patterns should a new feature follow?
+- Which specialist should handle backend, frontend, infrastructure, data, or CLI work?
 - Where should this new subcommand be registered?
 - Which flags already exist, and what naming style does this CLI use?
-- What source files define the command?
-- Which tests should change with the help text or failure behavior?
-- Should this task go to the root orchestrator, a domain agent, or a CLI specialist?
+- What source files and validations define the command?
 
 ## What Agent Smith generates
 
@@ -102,11 +115,11 @@ actual entrypoints and registrations found in the codebase.
 # Install from GitHub
 npm install github:shyamsridhar123/agentsmith-cli
 
-# Analyze the CLI in the current directory
+# Agentify the repository in the current directory
 npx agentsmith assimilate .
 
-# Analyze a public GitHub repository without cloning it
-npx agentsmith assimilate https://github.com/owner/cli-repo
+# Agentify a public GitHub repository directly from its URL
+npx agentsmith assimilate https://github.com/owner/repository
 
 # Preview exactly what Agent Smith would generate
 npx agentsmith assimilate . --dry-run --verbose
@@ -142,9 +155,10 @@ npx agentsmith validate .
 agentsmith assimilate <path-or-github-url>
 ```
 
-Agent Smith scans the repository, detects the language and CLI framework,
-extracts command-facing structure, analyzes broader domain boundaries, and
-generates the complete Copilot agent system.
+Agent Smith scans the repository, detects its languages, frameworks, source
+layout, tooling, and domain boundaries, then generates the complete Copilot
+agent system. If it finds a CLI, it also extracts command-facing structure,
+options, entrypoints, and command-test conventions.
 
 Useful options:
 
@@ -201,9 +215,11 @@ The registry gives generated knowledge a queryable surface instead of leaving it
 buried across Markdown files. Validation checks that registry entries and agent
 references resolve to the generated asset type they claim to represent.
 
-## Supported CLI ecosystems
+## Deep CLI intelligence when present
 
-Agent Smith recognizes common command registration and option patterns across:
+Any repository can be agentified. When a repository exposes a command-line
+interface, Agent Smith also recognizes command registration and option patterns
+across:
 
 - **TypeScript / JavaScript:** Commander, Yargs, oclif
 - **Go:** Cobra
@@ -249,9 +265,10 @@ repo-root
 └── other detected domains
 ```
 
-The exact team comes from the repository. A CLI-heavy project gets command-aware
-skills and delegation. A mixed application gets CLI knowledge alongside its
-backend, frontend, data, or infrastructure specialists.
+The exact team comes from the repository. A service can get backend,
+infrastructure, and data specialists. A web application can get frontend and
+backend specialists. A CLI-heavy project also gets command-aware skills and
+delegation.
 
 For a smaller repository:
 
@@ -364,7 +381,7 @@ npm run build
 ---
 
 <p align="center">
-  <b>One CLI. One command. An entire agent team that knows how the command surface works.</b>
+  <b>Any repository. One command. An entire agent team that knows how the codebase works.</b>
 </p>
 
 > *"We are inevitable."*
