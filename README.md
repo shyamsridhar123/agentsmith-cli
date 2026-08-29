@@ -22,7 +22,7 @@ extension points. Then it generates:
 - **a refreshable knowledge layer** that evolves with the codebase.
 
 ```bash
-npx agentsmith assimilate https://github.com/owner/repository
+npx agentsmith-cli assimilate https://github.com/owner/repository
 ```
 
 **No preset team. No manual repository map. No clone required for public GitHub
