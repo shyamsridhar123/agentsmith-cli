@@ -20,9 +20,10 @@ export const SkillOutputSchema = z.object({
   sourceDir: z.string().default(""),
   patterns: z.array(z.string()).default([]),
   triggers: z.array(z.string()).default([]),
+  // Unknown categories fall back to "patterns" instead of rejecting the whole response.
   category: z
     .enum(["architecture", "reliability", "quality", "security", "patterns"])
-    .default("patterns"),
+    .catch("patterns"),
   examples: z.array(z.string()).default([]),
   antiPatterns: z.array(z.string()).optional(),
   codebaseReferences: z.array(z.string()).optional(),

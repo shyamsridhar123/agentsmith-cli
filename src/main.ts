@@ -60,7 +60,7 @@ program
   .option("-n, --dry-run", "Preview what would be generated without writing files")
   .option("-v, --verbose", "Show detailed analysis output including file-by-file processing")
   .option("-o, --output <path>", "Output directory for generated assets")
-  .option("--no-instructions", "Skip generation of .github/copilot-instructions.md")
+  .option("--no-instructions", "Skip generation of .github/copilot-instructions.md and .github/instructions/")
   .option("--single-agent", "Generate a single agent.md instead of multi-agent constellation (v0.3 compat)")
   .option("--no-cache", "Disable the analysis cache")
   .option("--run-hooks", "Execute post-generate hooks created by this run (disabled by default)")
@@ -78,6 +78,7 @@ ${chalk.bold("Examples:")}
 
 ${chalk.bold("Generated assets:")}
   .github/copilot-instructions.md  - Workspace-wide Copilot instructions
+  .github/instructions/*.instructions.md - Folder-specific Copilot instructions (applyTo)
   .github/skills/<name>/SKILL.md   - Reusable skill definitions
   .github/agents/<name>.agent.md   - Agent configurations (multi-agent constellation)
   .github/copilot/handoffs.json    - Agent delegation graph

@@ -8,6 +8,7 @@ import { CopilotClient } from "@github/copilot-sdk";
 import path from "path";
 import {
   createRepositorySnapshot,
+  isAgentGuidancePath,
   isGeneratedRepositoryPath,
   isSensitiveRepositoryPath,
   normalizeRepositoryPath,
@@ -32,7 +33,11 @@ import {
   generateCLISkills,
   mergeCLISkills,
 } from "./cli.js";
-import { createSecureAnalysisSessionConfig } from "./session-security.js";
+import {
+  createSecureAnalysisSessionConfig,
+  resolveAnalysisModel,
+} from "./session-security.js";
+import { mapSourceDirsToRepository } from "./source-dirs.js";
 
 const MAX_FILE_SAMPLES = 20;
 const MAX_SAMPLE_BYTES = 10_000;
@@ -47,8 +52,9 @@ export function selectLocalAnalysisSamplePaths(
       !isGeneratedRepositoryPath(file.relativePath)
     )
     .sort((left, right) => {
-      if (left.isConfig && !right.isConfig) return -1;
-      if (!left.isConfig && right.isConfig) return 1;
+      const leftFirst = left.isConfig || isAgentGuidancePath(left.relativePath);
+      const rightFirst = right.isConfig || isAgentGuidancePath(right.relativePath);
+      if (leftFirst !== rightFirst) return leftFirst ? -1 : 1;
       const leftDepth = normalizeRepositoryPath(left.relativePath).split("/").length;
       const rightDepth = normalizeRepositoryPath(right.relativePath).split("/").length;
       return leftDepth - rightDepth ||
@@ -116,10 +122,15 @@ export class Analyzer {
     try {
       await this.client.start();
     } catch (error) {
-      console.error("  [SDK] Failed to start client:", (error as Error).message);
+      const message = (error as Error).message;
+      console.error("  [SDK] Failed to start client:", message);
       console.error("  [SDK] Make sure Copilot CLI is installed and in PATH");
       console.error("  [SDK] Falling back to heuristic analysis...\n");
-      return this.generateFallbackAnalysis(analyzedScanResult, cli);
+      return this.generateFallbackAnalysis(
+        analyzedScanResult,
+        cli,
+        `could not start the Copilot client: ${message}`,
+      );
     }
 
     if (this.verbose) {
@@ -127,8 +138,9 @@ export class Analyzer {
     }
 
     try {
+      const model = resolveAnalysisModel();
       if (this.verbose) {
-        console.log("  [SDK] Creating session with model: gpt-5...");
+        console.log(`  [SDK] Creating session with model: ${model ?? "Copilot default"}...`);
       }
 
       // Detect potential domain boundaries for system prompt
@@ -136,7 +148,7 @@ export class Analyzer {
 
       // Create a session with custom tools for analysis
       const session = await this.client.createSession({
-        model: "gpt-5",
+        ...(model ? { model } : {}),
         streaming: true,
         ...createSecureAnalysisSessionConfig(
           getSystemPrompt(analyzedScanResult.language, domains),
@@ -263,9 +275,10 @@ export class Analyzer {
       await session.disconnect();
       return result;
     } catch (error) {
-      console.error(`\n  [SDK] Error: ${(error as Error).message}`);
+      const message = (error as Error).message;
+      console.error(`\n  [SDK] Error: ${message}`);
       console.error("  [SDK] Falling back to heuristic analysis...\n");
-      return this.generateFallbackAnalysis(analyzedScanResult, cli);
+      return this.generateFallbackAnalysis(analyzedScanResult, cli, message);
     } finally {
       if (this.client) {
         try {
@@ -305,19 +318,27 @@ export class Analyzer {
     const parsed = parseAnalysisResponse(response, () => null);
 
     if (parsed === null) {
-      return this.generateFallbackAnalysis(scanResult, cli);
+      return this.generateFallbackAnalysis(
+        scanResult,
+        cli,
+        "the response was not valid analysis JSON",
+      );
     }
 
-    const flatAgents = flattenAgents(parsed.agents);
+    const { skills, agents } = mapSourceDirsToRepository(
+      parsed.skills as SkillDefinition[],
+      flattenAgents(parsed.agents),
+      scanResult.files.map((file) => file.relativePath),
+    );
 
     return {
       repoName: path.basename(scanResult.rootPath),
       skills: mergeCLISkills(
-        parsed.skills as SkillDefinition[],
+        skills,
         cli ? generateCLISkills(cli) : [],
       ),
-      agents: flatAgents,
-      tools: extractAllTools(flatAgents),
+      agents,
+      tools: extractAllTools(agents),
       hooks: parsed.hooks.length > 0
         ? (parsed.hooks as AnalysisResult["hooks"])
         : generateDefaultHooks(scanResult.language, scanResult.testFiles.length > 0),
@@ -328,7 +349,8 @@ export class Analyzer {
 
   private generateFallbackAnalysis(
     scanResult: ScanResult,
-    cli?: AnalysisResult["cli"],
+    cli: AnalysisResult["cli"] | undefined,
+    fallbackReason: string,
   ): AnalysisResult {
     // Detect domains for hierarchical agent structure
     const domains = detectDomainBoundaries(scanResult.files, path.sep);
@@ -390,6 +412,7 @@ export class Analyzer {
       hooks,
       summary: `A ${scanResult.language} repository${scanResult.framework ? ` using ${scanResult.framework}` : ""} with ${domains.length} detected domains.`,
       cli,
+      fallbackReason,
     };
   }
 }

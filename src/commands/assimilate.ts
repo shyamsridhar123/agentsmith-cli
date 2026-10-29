@@ -18,6 +18,7 @@ import {
   createLocalAnalysisSnapshot,
   RemoteAnalyzer,
 } from "../analyzer/index.js";
+import { resolveAnalysisModel } from "../analyzer/session-security.js";
 import { Generator } from "../generator/index.js";
 import { Registry } from "../registry/index.js";
 import { HookRunner } from "../hooks/index.js";
@@ -99,7 +100,7 @@ export async function assimilateCommand(
       return;
     }
 
-    console.log(chalk.green(`  ✓ ${license} - permissive license`));
+    console.log(chalk.green(`  ✓ ${license} - allowed license`));
 
     // Use the remote analyzer only after the license boundary has been checked.
     console.log(chalk.green("\n[ANALYZE]"), `Analyzing ${getRepoName(target)} via GitHub API...`);
@@ -165,17 +166,7 @@ export async function assimilateCommand(
     }
 
     // Summary
-    const agentCount = generated.agentFiles.length;
-    console.log(
-      chalk.green("\n[COMPLETE]"),
-      `${result.skills.length} skills, ${agentCount} agent(s), ${result.hooks.length} hooks generated.`
-    );
-
-    if (options.dryRun) {
-      console.log(chalk.yellow("\nDry run - no files were written."));
-    } else {
-      console.log(chalk.gray("\nYour repository has been assimilated.\n"));
-    }
+    reportOutcome(result, generated.agentFiles.length, options.dryRun);
 
   } else {
     // Local path - use original flow with cloning
@@ -211,7 +202,7 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       return;
     }
 
-    console.log(chalk.green(`  ✓ ${license.name} - permissive license`));
+    console.log(chalk.green(`  ✓ ${license.name} - allowed license`));
 
     console.log(chalk.green("\n[SCAN]"), "Enumerating repository...");
 
@@ -260,7 +251,9 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
           scanResult,
           repositorySnapshot,
         );
-        await cache.set(snapshotKey, analysisResult);
+        if (!analysisResult.fallbackReason) {
+          await cache.set(snapshotKey, analysisResult);
+        }
       }
     }
     if (!analysisResult) {
@@ -328,21 +321,35 @@ async function assimilateLocal(target: string, options: AssimilateOptions): Prom
       );
     }
 
-    const localAgentCount = generated.agentFiles.length;
-    console.log(
-      chalk.green("\n[COMPLETE]"),
-      `${analysisResult.skills.length} skills, ${localAgentCount} agent(s), ${analysisResult.hooks.length} hooks generated.`
-    );
-
-    if (options.dryRun) {
-      console.log(chalk.yellow("\nDry run - no files were written."));
-    } else {
-      console.log(chalk.gray("\nYour repository has been assimilated.\n"));
-    }
+    reportOutcome(analysisResult, generated.agentFiles.length, options.dryRun);
   } finally {
     if (resolved.isTemporary) {
       await resolved.cleanup();
     }
+  }
+}
+
+/** Print the run summary; a fallback analysis is reported as a failure with exit code 1. */
+function reportOutcome(
+  result: AnalysisResult,
+  agentCount: number,
+  dryRun?: boolean,
+): void {
+  const counts = `${result.skills.length} skills, ${agentCount} agent(s), and ${result.hooks.length} hooks`;
+
+  if (result.fallbackReason) {
+    process.exitCode = 1;
+    console.log(chalk.red("\n[FAILED]"), `Copilot analysis failed: ${result.fallbackReason}`);
+    console.log(chalk.yellow(`  ⚠ The ${counts} are generic defaults, not analysis of this repository.`));
+    console.log(chalk.yellow("  ⚠ Fix the error and run assimilate again."));
+  } else {
+    console.log(chalk.green("\n[COMPLETE]"), `${counts} generated.`);
+  }
+
+  if (dryRun) {
+    console.log(chalk.yellow("\nDry run - no files were written."));
+  } else if (!result.fallbackReason) {
+    console.log(chalk.gray("\nYour repository has been assimilated.\n"));
   }
 }
 
@@ -410,6 +417,11 @@ export async function buildAnalysisCacheKey(
   }
   files.sort(([left], [right]) => left.localeCompare(right));
   const snapshotPaths = new Set(files.map(([relativePath]) => relativePath));
+  const byPath = (left: string, right: string) => left.localeCompare(right);
+  const keyPaths = (paths: readonly string[]) => paths
+    .map(normalizeRepositoryPath)
+    .filter((file) => snapshotPaths.has(file))
+    .sort(byPath);
   const analyzedFiles = scanResult.files
     .map((file) => ({
       relativePath: normalizeRepositoryPath(file.relativePath),
@@ -417,26 +429,22 @@ export async function buildAnalysisCacheKey(
       isTest: file.isTest,
       isConfig: file.isConfig,
     }))
-    .filter((file) => snapshotPaths.has(file.relativePath));
+    .filter((file) => snapshotPaths.has(file.relativePath))
+    .sort((left, right) => byPath(left.relativePath, right.relativePath));
 
   return stableCacheKey({
-    schema: 4,
+    schema: 5,
     root: snapshot.rootPath,
     files,
     analyzedFiles,
     language: scanResult.language,
     framework: scanResult.framework,
-    configFiles: scanResult.configFiles
-      .map(normalizeRepositoryPath)
-      .filter((file) => snapshotPaths.has(file)),
-    testFiles: scanResult.testFiles
-      .map(normalizeRepositoryPath)
-      .filter((file) => snapshotPaths.has(file)),
-    sourceDirectories: scanResult.sourceDirectories,
+    configFiles: keyPaths(scanResult.configFiles),
+    testFiles: keyPaths(scanResult.testFiles),
+    sourceDirectories: [...scanResult.sourceDirectories].sort(byPath),
     cliFramework: scanResult.cliFramework,
-    cliEntryFiles: scanResult.cliEntryFiles
-      .map(normalizeRepositoryPath)
-      .filter((file) => snapshotPaths.has(file)),
+    cliEntryFiles: keyPaths(scanResult.cliEntryFiles),
+    model: resolveAnalysisModel() ?? null,
   });
 }
 

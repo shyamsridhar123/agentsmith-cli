@@ -34,7 +34,11 @@ import {
   getRemoteSystemPrompt,
   selectRemotePriorityFiles,
 } from "./remote-helpers.js";
-import { createSecureAnalysisSessionConfig } from "./session-security.js";
+import {
+  createSecureAnalysisSessionConfig,
+  resolveAnalysisModel,
+} from "./session-security.js";
+import { mapSourceDirsToRepository } from "./source-dirs.js";
 
 // Files/dirs to ignore
 const IGNORE_PATTERNS = [
@@ -106,11 +110,6 @@ export class RemoteAnalyzer {
 
     // Detect language from file extensions
     const language = this.detectLanguage(files);
-    const framework = this.detectFramework(files);
-
-    if (this.verbose) {
-      console.log(`  [GH] Language: ${language}, Framework: ${framework || "none"}`);
-    }
 
     // Get priority files for analysis
     const priorityPaths = this.selectPriorityFiles(files);
@@ -120,6 +119,12 @@ export class RemoteAnalyzer {
     }
 
     const fileContents = await this.github.getFiles(priorityPaths, revision);
+    const framework = this.detectFramework(files, fileContents.get("package.json"));
+
+    if (this.verbose) {
+      console.log(`  [GH] Language: ${language}, Framework: ${framework || "none"}`);
+    }
+
     const preliminaryCLI = this.detectCLI(files, fileContents);
     const missingCLIPaths = selectCLIImplementationFiles(
       files.map((file) => file.path),
@@ -170,13 +175,16 @@ export class RemoteAnalyzer {
         console.log("  [SDK] Starting client...");
       }
       await client.start();
+      const model = resolveAnalysisModel();
       if (this.verbose) {
-        console.log("  [SDK] Client started, status:", client.getStatus());
-        console.log("  [SDK] Creating session...");
+        // A failed status call should not change the outcome of a verbose run.
+        const status = await client.getStatus().catch(() => undefined);
+        console.log("  [SDK] Client started, status:", status ?? "unavailable");
+        console.log(`  [SDK] Creating session with model: ${model ?? "Copilot default"}...`);
       }
 
       const session = await client.createSession({
-        model: "gpt-5",
+        ...(model ? { model } : {}),
         streaming: true,
         ...createSecureAnalysisSessionConfig(this.getSystemPrompt()),
       });
@@ -258,13 +266,18 @@ export class RemoteAnalyzer {
       const finalContent = responseContent || streamedContent;
 
       // Parse response
-      return this.buildResult(finalContent, repoInfo, language, framework, cli);
+      return this.buildResult(finalContent, repoInfo, language, framework, tree, cli) ??
+        this.generateFallback(
+          repoInfo, language, framework, files, cli,
+          "the response was not valid analysis JSON",
+        );
 
     } catch (error) {
-      console.error(`  [SDK] Error: ${(error as Error).message}`);
+      const message = (error as Error).message;
+      console.error(`  [SDK] Error: ${message}`);
       if (sessionId) await client.deleteSession(sessionId).catch(() => {});
       await client.stop().catch(() => {});
-      return this.generateFallback(repoInfo, language, framework, files, cli);
+      return this.generateFallback(repoInfo, language, framework, files, cli, message);
     } finally {
       clearAnalysisTimeout();
     }
@@ -274,8 +287,11 @@ export class RemoteAnalyzer {
     return detectRemoteLanguage(files);
   }
 
-  private detectFramework(files: GitHubFile[]): string | undefined {
-    return detectRemoteFramework(files);
+  private detectFramework(
+    files: GitHubFile[],
+    packageJson?: string,
+  ): string | undefined {
+    return detectRemoteFramework(files, packageJson);
   }
 
   private detectCLI(
@@ -314,34 +330,29 @@ export class RemoteAnalyzer {
     repo: { owner: string; repo: string; license?: string },
     language: string,
     framework: string | undefined,
+    tree: GitHubFile[],
     cli?: AnalysisResult["cli"],
-  ): AnalysisResult {
+  ): AnalysisResult | null {
     const parsed = parseAnalysisResponse(response, () => null);
 
     if (parsed === null) {
-      // Will not happen in the fallback path, but this handles parse failure
-      return {
-        repoName: repo.repo,
-        skills: cli ? generateCLISkills(cli) : [],
-        agents: [],
-        tools: [],
-        hooks: generateDefaultHooks(language, false),
-        summary: "",
-        cli,
-        repo: { ...repo, language, framework },
-      };
+      return null;
     }
 
-    const flatAgents = flattenAgents(parsed.agents);
+    const { skills, agents } = mapSourceDirsToRepository(
+      parsed.skills as SkillDefinition[],
+      flattenAgents(parsed.agents),
+      tree.filter((entry) => entry.type === "file").map((entry) => entry.path),
+    );
 
     return {
       repoName: repo.repo,
       skills: mergeCLISkills(
-        parsed.skills as SkillDefinition[],
+        skills,
         cli ? generateCLISkills(cli) : [],
       ),
-      agents: flatAgents,
-      tools: extractAllTools(flatAgents),
+      agents,
+      tools: extractAllTools(agents),
       hooks: generateDefaultHooks(language, false),
       summary: parsed.summary,
       cli,
@@ -354,7 +365,8 @@ export class RemoteAnalyzer {
     language: string,
     framework: string | undefined,
     files: GitHubFile[],
-    cli?: AnalysisResult["cli"],
+    cli: AnalysisResult["cli"] | undefined,
+    fallbackReason: string,
   ): AnalysisResult {
     // Detect source directories
     const srcDirs = new Set<string>();
@@ -390,6 +402,7 @@ export class RemoteAnalyzer {
       summary: `A ${language} repository${framework ? ` using ${framework}` : ""}.`,
       cli,
       repo: { ...repo, language, framework },
+      fallbackReason,
     };
   }
 }

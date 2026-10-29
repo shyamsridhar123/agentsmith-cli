@@ -9,6 +9,8 @@ import {
   buildCopilotInstructions,
   buildDirectoryInstructions,
   mergeWithExisting,
+  removeManagedInstructions,
+  renderDirectoryInstructionsFile,
 } from "./instructions-writer.js";
 import { buildRootAgentMd, buildSubAgentMd } from "./agent-writer.js";
 import { buildHandoffGraph, serializeHandoffGraph } from "./handoff-writer.js";
@@ -26,6 +28,7 @@ import {
   type PlannedSkillFile,
 } from "./generation-plan.js";
 import {
+  previousInstructionFiles,
   previousManagedFiles,
   readFreshness,
   serializeFreshness,
@@ -50,6 +53,12 @@ import {
 export interface GeneratorResult {
   files: string[];
   hookFiles: string[];
+  /**
+   * Path-specific instruction files Agent Smith maintains, with the `applyTo`
+   * glob each was generated with. A `--no-instructions` run keeps the previous
+   * run's list so a later run can still clean them up.
+   */
+  instructionFiles: Array<{ file: string; applyTo: string }>;
   agentFiles: Array<{ name: string; file: string; isSubAgent: boolean }>;
   skillFiles: Array<{ name: string; file: string }>;
 }
@@ -73,6 +82,7 @@ export class Generator {
     const result: GeneratorResult = {
       files: [],
       hookFiles: plan.hookFiles.map((hook) => hook.file),
+      instructionFiles: [],
       agentFiles: plan.agentFiles.map(({ name, file, isSubAgent }) => ({
         name,
         file,
@@ -107,7 +117,10 @@ export class Generator {
 
     if (!this.noInstructions) {
       result.files.push(await this.generateCopilotInstructions(analysis));
-      result.files.push(...await this.generateDirectoryInstructions(analysis));
+      result.instructionFiles = await this.generateDirectoryInstructions(analysis);
+      result.files.push(...result.instructionFiles.map(({ file }) => file));
+    } else {
+      result.instructionFiles = previousInstructionFiles(previous);
     }
 
     for (const hook of plan.hookFiles) {
@@ -180,29 +193,22 @@ export class Generator {
 
   private async generateDirectoryInstructions(
     analysis: AnalysisResult,
-  ): Promise<string[]> {
-    const generated: string[] = [];
+  ): Promise<GeneratorResult["instructionFiles"]> {
+    const generated: GeneratorResult["instructionFiles"] = [];
     for (const instruction of buildDirectoryInstructions(analysis)) {
-      const directoryPath = path.resolve(this.rootPath, instruction.directory);
-      const relative = path.relative(this.rootPath, directoryPath);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
-      const relativePath = path.posix.join(
-        instruction.directory.replace(/\\/g, "/"),
-        ".copilot-instructions.md",
-      );
-      let content = instruction.content;
+      let existing: string | undefined;
       if (!this.dryRun) {
         try {
-          content = mergeWithExisting(
-            await readContainedFile(await this.getContainedRoot(), this.absolute(relativePath)),
-            instruction.content,
+          existing = await readContainedFile(
+            await this.getContainedRoot(),
+            this.absolute(instruction.file),
           );
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
       }
-      await this.write(relativePath, content);
-      generated.push(relativePath);
+      await this.write(instruction.file, renderDirectoryInstructionsFile(instruction, existing));
+      generated.push({ file: instruction.file, applyTo: instruction.applyTo });
     }
     return generated;
   }
@@ -253,6 +259,7 @@ export class Generator {
       ...result.agentFiles.map((agent) => agent.file),
       ...result.skillFiles.map((skill) => skill.file),
       ...result.hookFiles,
+      ...result.instructionFiles.map(({ file }) => file),
       ...(currentHandoff ? [currentHandoff] : []),
     ].map((file) => this.pathKey(file)));
 
@@ -267,9 +274,21 @@ export class Generator {
         await this.removeIfOwnedAndUnchanged(canonical, stale.digest);
       }
     }
+
+    for (const stale of previousInstructionFiles(previous)) {
+      let canonical: string;
+      try {
+        canonical = this.assertManagedPath(stale.file, "instructions");
+      } catch {
+        continue;
+      }
+      if (!currentFiles.has(this.pathKey(canonical))) {
+        await this.removeStaleInstructions(canonical, stale.applyTo);
+      }
+    }
   }
 
-  private assertManagedPath(file: string, kind: ManagedAssetKind): string {
+  private assertManagedPath(file: string, kind: ManagedAssetKind | "instructions"): string {
     const normalized = file.replace(/\\/g, "/");
     assertPortablePathComponents(normalized, `managed ${kind} path`);
     const safe = normalized === path.posix.normalize(normalized) && (
@@ -277,6 +296,10 @@ export class Generator {
       || (kind === "skill" && /^\.github\/skills\/[^/]+\/SKILL\.md$/.test(normalized))
       || (kind === "hook" && /^\.github\/hooks\/[^/]+\.ya?ml$/.test(normalized))
       || (kind === "handoff" && normalized === ".github/copilot/handoffs.json")
+      || (
+        kind === "instructions"
+        && /^\.github\/instructions\/agentsmith-[^/]+\.instructions\.md$/.test(normalized)
+      )
     );
     if (!safe) {
       throw new Error(`Unsafe managed ${kind} path in freshness metadata: ${file}`);
@@ -299,6 +322,23 @@ export class Generator {
         return;
       }
       await removeContainedExistingFile(root, absolutePath, expectedDigest);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  private async removeStaleInstructions(relativePath: string, applyTo: string): Promise<void> {
+    const root = await this.getContainedRoot();
+    const absolutePath = this.absolute(relativePath);
+    try {
+      const content = await readContainedFile(root, absolutePath);
+      const remaining = removeManagedInstructions(content, applyTo);
+      if (remaining === undefined) return;
+      if (remaining === "") {
+        await removeContainedExistingFile(root, absolutePath, digestManagedContent(content));
+      } else {
+        await atomicWriteContainedFile(root, absolutePath, remaining);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }

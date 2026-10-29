@@ -1,4 +1,5 @@
 import type { AnalysisResult, SkillDefinition } from "../analyzer/types.js";
+import { agentHeading } from "./agent-writer.js";
 
 interface WriterHelpers {
   toTitleCase: (value: string | unknown) => string;
@@ -114,7 +115,7 @@ description: ${helpers.quoteYamlValue(description)}
 ${toolsList}
 ---
 
-# ${helpers.toTitleCase(agentName)} Agent
+# ${agentHeading(helpers.toTitleCase(agentName))}
 
 ${description}
 

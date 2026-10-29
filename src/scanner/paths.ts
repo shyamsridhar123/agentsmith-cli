@@ -181,10 +181,18 @@ export function isGeneratedRepositoryPath(filePath: string): boolean {
   return (
     segments.some((segment) => GENERATED_OR_VENDOR_SEGMENTS.has(segment)) ||
     /^\.github\/(?:agents|skills|copilot|hooks)(\/|$)/i.test(normalized) ||
+    /^\.github\/instructions\/agentsmith-[^/]+\.instructions\.md$/i.test(normalized) ||
     /(^|\/)skills-registry\.jsonl$/i.test(normalized) ||
     /(^|\/)\.copilot-instructions\.md$/i.test(normalized) ||
     /\.(?:generated|gen)\.[^/]+$/i.test(normalized)
   );
+}
+
+/** Contributor and coding-agent guides that state a repository's own conventions. */
+export const AGENT_GUIDANCE_FILES: readonly string[] = ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"];
+
+export function isAgentGuidancePath(filePath: string): boolean {
+  return AGENT_GUIDANCE_FILES.includes(path.posix.basename(normalizeRepositoryPath(filePath)));
 }
 
 export function isTestOrFixturePath(filePath: string): boolean {

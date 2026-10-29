@@ -81,4 +81,6 @@ export interface AnalysisResult {
     language: string;
     framework?: string;
   };
+  /** Set when Copilot analysis failed and the result holds generic heuristic defaults. */
+  fallbackReason?: string;
 }

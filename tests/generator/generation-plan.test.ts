@@ -63,6 +63,7 @@ describe("Generator generation planning", () => {
       "agentFiles",
       "files",
       "hookFiles",
+      "instructionFiles",
       "skillFiles",
     ]);
     expect(result.skillFiles).toEqual([{

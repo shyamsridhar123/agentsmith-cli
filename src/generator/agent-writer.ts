@@ -29,6 +29,14 @@ const BASE_TOOLS = [
 ];
 
 /**
+ * Heading for an agent file. Names such as "api-agent" already end in "Agent",
+ * so the suffix is only added when it is missing.
+ */
+export function agentHeading(title: string): string {
+  return /\bagent$/i.test(title) ? title : `${title} Agent`;
+}
+
+/**
  * Build the .agent.md content for a root orchestrator agent.
  * Includes `runSubagent` in tools and delegation instructions for each sub-agent.
  */
@@ -58,7 +66,8 @@ export function buildRootAgentMd(
   if (subAgents.length > 0) {
     const delegationEntries = subAgents.map(sa => {
       const triggerList = sa.triggers.length > 0 ? sa.triggers.join(", ") : "general";
-      return `- **@${sa.name}** — ${sa.description}. Triggers: ${triggerList}`;
+      const summary = sa.description.trim().replace(/\.+$/, "");
+      return `- **@${sa.name}** — ${summary}. Triggers: ${triggerList}`;
     }).join("\n");
 
     delegationSection = `## Agent Delegation
@@ -90,7 +99,7 @@ description: ${helpers.quoteYamlValue(description)}
 ${toolsList}
 ---
 
-# ${helpers.toTitleCase(agentName)} Agent
+# ${agentHeading(helpers.toTitleCase(agentName))}
 
 ${description}
 
@@ -156,7 +165,7 @@ description: ${helpers.quoteYamlValue(agent.description)}
 ${toolsList}
 ---
 
-# ${helpers.toTitleCase(agent.name)} Agent
+# ${agentHeading(helpers.toTitleCase(agent.name))}
 
 Specialist agent for the ${agent.name} domain.
 

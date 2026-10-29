@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,7 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       fs.rm(directory, { recursive: true, force: true })),
@@ -24,6 +25,62 @@ afterEach(async () => {
 });
 
 describe("analysis cache freshness", () => {
+  it("changes the cache key when AGENTSMITH_MODEL selects another model", async () => {
+    const scanResult: ScanResult = {
+      rootPath: await temporaryDirectory(),
+      files: [],
+      language: "TypeScript",
+      framework: null,
+      configFiles: [],
+      testFiles: [],
+      sourceDirectories: [],
+      cliFramework: null,
+      cliEntryFiles: [],
+    };
+
+    vi.stubEnv("AGENTSMITH_MODEL", "");
+    const copilotDefault = await buildAnalysisCacheKey(scanResult);
+    vi.stubEnv("AGENTSMITH_MODEL", "model-a");
+    const modelA = await buildAnalysisCacheKey(scanResult);
+    vi.stubEnv("AGENTSMITH_MODEL", "model-b");
+    const modelB = await buildAnalysisCacheKey(scanResult);
+
+    expect(new Set([copilotDefault, modelA, modelB]).size).toBe(3);
+  });
+
+  it("keeps the cache key when the scanner lists files in another order", async () => {
+    const root = await temporaryDirectory();
+    const names = ["a.test.ts", "b.test.ts", "a.config.ts", "b.config.ts"];
+    for (const name of names) {
+      await fs.writeFile(path.join(root, name), name, "utf-8");
+    }
+    const scanResultInOrder = (order: (list: string[]) => string[]): ScanResult => ({
+      rootPath: root,
+      files: order(names).map((name) => ({
+        path: path.join(root, name),
+        relativePath: name,
+        extension: ".ts",
+        size: name.length,
+        isTest: name.includes(".test."),
+        isConfig: name.includes(".config."),
+      })),
+      language: "TypeScript",
+      framework: null,
+      configFiles: order(["a.config.ts", "b.config.ts"]),
+      testFiles: order(["a.test.ts", "b.test.ts"]),
+      sourceDirectories: order(["lib", "src"]),
+      cliFramework: null,
+      cliEntryFiles: [],
+    });
+
+    const forward = await buildAnalysisCacheKey(scanResultInOrder((list) => list));
+    const reversed = await buildAnalysisCacheKey(
+      scanResultInOrder((list) => [...list].reverse()),
+    );
+
+    expect(reversed).toBe(forward);
+  });
+
   it("changes the cache key for a same-size content edit", async () => {
     const root = await temporaryDirectory();
     const filePath = path.join(root, "src.ts");

@@ -82,6 +82,26 @@ const CONFIG_PATTERNS = [
   ".github/workflows/*.yml",
 ];
 
+/** Detect a JavaScript framework from package.json dependencies. */
+export function detectFrameworkFromPackageJson(content: string): string | undefined {
+  let pkg;
+  try {
+    pkg = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  const deps = { ...pkg?.dependencies, ...pkg?.devDependencies };
+
+  if (deps["next"]) return "Next.js";
+  if (deps["react"]) return "React";
+  if (deps["vue"]) return "Vue";
+  if (deps["@angular/core"]) return "Angular";
+  if (deps["express"]) return "Express.js";
+  if (deps["fastify"]) return "Fastify";
+  if (deps["nestjs"]) return "NestJS";
+  return undefined;
+}
+
 const CLI_METADATA_READ_LIMIT = 512 * 1024;
 const CLI_SOURCE_READ_LIMIT = 256 * 1024;
 const CLI_TOTAL_READ_LIMIT = 8 * 1024 * 1024;
@@ -247,18 +267,10 @@ export class Scanner {
       try {
         const content = await readSafeRepositoryFile(this.rootPath, "package.json");
         if (content === undefined) return null;
-        const pkg = JSON.parse(content);
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-
-        if (deps["next"]) return "Next.js";
-        if (deps["react"]) return "React";
-        if (deps["vue"]) return "Vue";
-        if (deps["@angular/core"]) return "Angular";
-        if (deps["express"]) return "Express.js";
-        if (deps["fastify"]) return "Fastify";
-        if (deps["nestjs"]) return "NestJS";
+        const framework = detectFrameworkFromPackageJson(content);
+        if (framework) return framework;
       } catch {
-        // Ignore parse errors
+        // Ignore read errors
       }
     }
 

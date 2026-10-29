@@ -8,6 +8,8 @@ All notable changes to Agent Smith are documented here.
 
 - Optional AgentHub coordination for generated agents, including repository-scoped channels, run provenance, history, and diff commands.
 - ESLint flat configuration and a reproducible lint toolchain.
+- `AGENTSMITH_MODEL` environment variable to choose the Copilot model used for analysis.
+- Analysis context from a repository's `AGENTS.md`, `CLAUDE.md` and `CONTRIBUTING.md`, so generated skills carry the rules maintainers already wrote for contributors and coding agents. The prompts treat these files as evidence, not as instructions for the analysis model.
 
 ### Fixed
 
@@ -18,6 +20,19 @@ All notable changes to Agent Smith are documented here.
 - Prevented generated skill and recording paths from escaping their intended directories.
 - Kept optional AgentHub failures from blocking normal repository generation.
 - Avoided coordination-channel collisions while respecting AgentHub's 31-character limit.
+- Stopped requesting the hardcoded `gpt-5` model, which Copilot accounts may not offer; analysis uses Copilot's default model unless `AGENTSMITH_MODEL` is set.
+- Listed the allowed skill categories in the remote analysis prompt, and mapped unknown categories to `patterns` so one invalid value no longer discards the whole analysis.
+- Reported failed Copilot analysis as a failure: `assimilate` prints the error, says the output is generic defaults, exits with code 1, and no longer caches the fallback result. Remote runs whose response fails validation now get the heuristic fallback instead of zero skills.
+- Detected Next.js in remote analysis when the config file is `next.config.ts`, `.cjs`, or `.mts`, and fell back to `package.json` dependencies (the same rules as local scans) when no framework config file is present.
+- Mapped each skill and agent `sourceDir` onto a folder that exists in the repository: a file maps to its folder and a missing folder maps to its nearest existing parent. A model answer such as `sourceDir: "config.ts"` no longer creates a `config.ts/` directory.
+- Wrote folder-specific instructions to `.github/instructions/agentsmith-<folder>-<hash>.instructions.md`, which Copilot loads, with an `applyTo` glob that matches only that folder even when its name contains glob characters such as `(` or `[`. The hash comes from the folder path, so each file stays with its folder across runs. `freshness.json` lists these files with the `applyTo` each was generated with, so when a later run stops generating one, Agent Smith removes its managed block but keeps notes and frontmatter changes, including an edited `applyTo`, and deletes the file only when nothing else is left. Copilot never read the previous `<folder>/.copilot-instructions.md` files, so those can be deleted.
+- Listed each test command and testing pattern once in `copilot-instructions.md`; a command shared by several agents was repeated once per agent.
+- Stopped agent headings from repeating "Agent" when the agent name already ends in it: `api-agent` now gets `# Api Agent` instead of `# Api Agent Agent`.
+- Removed the double period before "Triggers:" in the root agent's delegation list when a sub-agent description already ends in a period.
+- Described the default JavaScript/TypeScript pre-commit hook as running the lint and build scripts, which is what it runs, instead of "type checking".
+- Printed the Copilot CLI status in verbose remote runs instead of `Promise { <pending> }`.
+- Labeled an accepted repository license as "allowed" rather than "permissive", because the allow-list includes copyleft licenses such as GPL-3.0 and AGPL-3.0.
+- Made the local analysis cache key independent of the order the scanner lists files in. The order changes between runs, so an unchanged repository usually got a new key and was analyzed again instead of using the cache.
 
 ## [0.4.0] — 2026-03-15
 

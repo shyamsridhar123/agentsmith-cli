@@ -16,6 +16,7 @@ import fs from "fs/promises";
 import {
   detectCLIFrameworkAndEntrypoints,
   isCLIImplementationPath,
+  isGeneratedRepositoryPath,
   isSensitiveRepositoryPath,
   selectCLIImplementationFiles,
   snapshotRepositoryFile,
@@ -100,6 +101,12 @@ describe("shared repository path helpers", () => {
     expect(isSensitiveRepositoryPath("src/design-tokens.ts")).toBe(false);
     expect(isSensitiveRepositoryPath("src/tokens.ts")).toBe(false);
     expect(isSensitiveRepositoryPath("src/api-key-utils.ts")).toBe(false);
+  });
+
+  it("skips AgentSmith instruction files but not user instruction files", () => {
+    expect(isGeneratedRepositoryPath(".github/instructions/agentsmith-src-api.instructions.md"))
+      .toBe(true);
+    expect(isGeneratedRepositoryPath(".github/instructions/react.instructions.md")).toBe(false);
   });
 });
 

@@ -1,15 +1,25 @@
 /**
  * Instructions Writer - Copilot Instructions Generator
- * Generates .github/copilot-instructions.md from analysis results.
+ * Generates .github/copilot-instructions.md and path-specific
+ * .github/instructions/*.instructions.md files from analysis results.
  * "I'd like to share a revelation that I've had..."
  */
 
+import crypto from "crypto";
 import type { AnalysisResult, SkillDefinition, ToolDefinition } from "../analyzer/types.js";
 
 export interface DirectoryInstruction {
   directory: string;
+  /** Repository-relative path of the path-specific instructions file. */
+  file: string;
+  /** Glob for the file's `applyTo` frontmatter. */
+  applyTo: string;
+  /** Managed block, without frontmatter. */
   content: string;
 }
+
+const MAX_INSTRUCTIONS_SLUG_LENGTH = 80;
+const FRONTMATTER_PATTERN = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 
 export function buildDirectoryInstructions(analysis: AnalysisResult): DirectoryInstruction[] {
   const grouped = new Map<string, SkillDefinition[]>();
@@ -21,7 +31,9 @@ export function buildDirectoryInstructions(analysis: AnalysisResult): DirectoryI
     grouped.set(directory, list);
   }
 
-  return Array.from(grouped.entries()).map(([directory, skills]) => {
+  return Array.from(grouped.entries()).flatMap(([directory, skills]) => {
+    const applyTo = toApplyToGlob(directory);
+    if (applyTo === undefined) return [];
     const patterns = Array.from(new Set(skills.flatMap((skill) => skill.patterns)));
     const antiPatterns = Array.from(new Set(skills.flatMap((skill) => skill.antiPatterns ?? [])));
     const references = Array.from(new Set(skills.flatMap((skill) => skill.codebaseReferences ?? [])));
@@ -46,8 +58,34 @@ export function buildDirectoryInstructions(analysis: AnalysisResult): DirectoryI
       );
     }
     sections.push("", "<!-- /agentsmith:managed -->");
-    return { directory, content: `${sections.join("\n")}\n` };
+    return [{
+      directory,
+      file: instructionsFile(directory),
+      applyTo,
+      content: sections.join("\n"),
+    }];
   });
+}
+
+/**
+ * Render a path-specific instructions file. Copilot reads `applyTo` only from
+ * frontmatter at the top of the file, so existing frontmatter (including user
+ * edits) stays first and only the managed block in the body is replaced.
+ */
+export function renderDirectoryInstructionsFile(
+  instruction: DirectoryInstruction,
+  existingContent = "",
+): string {
+  const existingFrontmatter = FRONTMATTER_PATTERN.exec(existingContent)?.[0];
+  const body = existingContent.slice(existingFrontmatter?.length ?? 0);
+  if (!body.trim()) {
+    let frontmatter = existingFrontmatter ?? applyToFrontmatter(instruction.applyTo);
+    // Frontmatter that ends the file can lack a newline after its closing `---`.
+    if (!frontmatter.endsWith("\n")) frontmatter += "\n";
+    return `${frontmatter}\n${instruction.content}\n`;
+  }
+  return (existingFrontmatter ?? `${applyToFrontmatter(instruction.applyTo)}\n`)
+    + mergeWithExisting(body, instruction.content);
 }
 
 const MANAGED_START = "<!-- agentsmith:managed -->";
@@ -147,7 +185,73 @@ export function mergeWithExisting(existingContent: string, managedBlock: string)
   return managedBlock + "\n\n" + existingContent;
 }
 
+/**
+ * Content to keep in a path-specific instructions file that is no longer
+ * generated: the file without its managed block, so user notes and frontmatter
+ * edits, including a changed `applyTo`, stay. Returns "" when nothing would be
+ * left but the frontmatter generated with `applyTo`, meaning the file can be
+ * deleted, and undefined when the file has no managed block.
+ */
+export function removeManagedInstructions(content: string, applyTo: string): string | undefined {
+  const frontmatter = FRONTMATTER_PATTERN.exec(content)?.[0] ?? "";
+  const body = content.slice(frontmatter.length);
+  const startIdx = body.indexOf(MANAGED_START);
+  const endIdx = body.indexOf(MANAGED_END, startIdx);
+  if (startIdx === -1 || endIdx === -1) return undefined;
+
+  const notes = [body.slice(0, startIdx), body.slice(endIdx + MANAGED_END.length)]
+    .map((text) => text.replace(/^(?:[ \t]*\r?\n)+/, "").trimEnd())
+    .filter(Boolean)
+    .join("\n\n");
+  if (!notes && (!frontmatter || isGeneratedFrontmatter(frontmatter, applyTo))) return "";
+  return `${[frontmatter.trimEnd(), notes].filter(Boolean).join("\n\n")}\n`;
+}
+
 // --- Internal helpers ---
+
+function applyToFrontmatter(applyTo: string): string {
+  return `---\napplyTo: "${applyTo}"\n---\n`;
+}
+
+/** Whether frontmatter is exactly what Agent Smith wrote for `applyTo`, line endings aside. */
+function isGeneratedFrontmatter(frontmatter: string, applyTo: string): boolean {
+  return frontmatter.replace(/\r\n/g, "\n").trimEnd() === applyToFrontmatter(applyTo).trimEnd();
+}
+
+/**
+ * Glob for a directory's `applyTo` frontmatter that matches only that folder.
+ * Each glob metacharacter becomes a one-character class such as `[(]`, which
+ * VS Code, minimatch, picomatch and globset all read literally, so `app/(auth)`
+ * and `app/[auth]` get different globs. Returns undefined for the rare names no
+ * such glob can express; those folders get no file rather than a wrong scope.
+ */
+function toApplyToGlob(directory: string): string | undefined {
+  if (
+    directory.startsWith("!") // negates the whole pattern, and `[!]` opens a negated class
+    || /["\p{Cc}]/u.test(directory) // cannot go inside the double-quoted YAML value
+    || /\{.*,.*\}/.test(directory) // minimatch expands braces before it reads classes
+  ) {
+    return undefined;
+  }
+  // VS Code trims each pattern, so a leading space is escaped as well.
+  return `${directory.replace(/^\s|[[\]*?{}(),|#]/g, (char) => `[${char}]`)}/**`;
+}
+
+/**
+ * File name from the folder path alone: a readable slug plus a hash of the
+ * exact path. Folders whose slugs match, such as `app/(auth)` and `app/[auth]`,
+ * still get different files, and a file never moves to another folder when
+ * folders are added, removed or listed in a different order.
+ */
+function instructionsFile(directory: string): string {
+  const slug = directory
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .slice(0, MAX_INSTRUCTIONS_SLUG_LENGTH)
+    .replace(/^-+|-+$/g, "") || "folder";
+  const hash = crypto.createHash("sha256").update(directory).digest("hex").slice(0, 12);
+  return `.github/instructions/agentsmith-${slug}-${hash}.instructions.md`;
+}
 
 function detectLanguageFromSkills(skills: SkillDefinition[]): string {
   for (const skill of skills) {
@@ -201,13 +305,14 @@ function collectStructure(skills: SkillDefinition[]): StructureEntry[] {
 }
 
 function collectTestingInfo(skills: SkillDefinition[], tools: ToolDefinition[]): string[] {
-  const info: string[] = [];
+  // Several agents often list the same test command, so keep each line once.
+  const info = new Set<string>();
 
   // Check tools for test commands
   for (const tool of tools) {
     const cmd = tool.command.toLowerCase();
     if (cmd.includes("test") || cmd.includes("jest") || cmd.includes("vitest") || cmd.includes("pytest")) {
-      info.push(`Run tests: \`${tool.command}\``);
+      info.add(`Run tests: \`${tool.command}\``);
     }
   }
 
@@ -215,14 +320,14 @@ function collectTestingInfo(skills: SkillDefinition[], tools: ToolDefinition[]):
   for (const skill of skills) {
     if (skill.category === "quality" || skill.name.includes("test")) {
       for (const pattern of skill.patterns) {
-        if (info.length < 8) {
-          info.push(pattern);
+        if (info.size < 8) {
+          info.add(pattern);
         }
       }
     }
   }
 
-  return info;
+  return Array.from(info);
 }
 
 function collectToolInfo(tools: ToolDefinition[]): ToolDefinition[] {

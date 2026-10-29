@@ -87,6 +87,8 @@ The result is a Copilot team that can answer practical questions such as:
 │   ├── handoffs.json                 # Agent delegation map
 │   └── freshness.json                # Generated-knowledge fingerprints
 ├── copilot-instructions.md           # Repository-wide operating context
+├── instructions/
+│   └── agentsmith-<folder>-<hash>.instructions.md  # Folder-specific context (applyTo)
 └── hooks/
     └── *.yaml                        # Generated lifecycle checks
 
@@ -155,7 +157,7 @@ Useful options:
 -v, --verbose           Show detailed analysis
 -o, --output <path>     Write generated assets elsewhere
 --no-cache              Disable analysis caching
---no-instructions       Skip copilot-instructions.md
+--no-instructions       Skip the Copilot instruction files
 --single-agent          Generate one combined agent
 --run-hooks             Run post-generation hooks created by this run
 --hub <url>             Enable optional AgentHub coordination
@@ -189,7 +191,9 @@ agentsmith refresh .
 `refresh` bypasses the analysis cache, regenerates the agent system, and updates
 freshness fingerprints. It also removes stale Agent Smith-owned agents, skills,
 hooks, and handoffs that are no longer part of the generated plan while leaving
-user-owned files alone.
+user-owned files alone. From a stale path-specific instructions file it removes
+only the managed block, so notes added outside the block and frontmatter edits,
+such as a changed `applyTo`, stay.
 
 ### 4. Search and validate
 
@@ -335,6 +339,10 @@ Run any command with `--help` for its options.
 
 The Copilot SDK uses the authenticated GitHub CLI session. AgentHub is required
 only when its optional coordination features are enabled.
+
+Analysis uses Copilot's default model. To pick a specific model that your
+Copilot account offers, set `AGENTSMITH_MODEL` (for example,
+`AGENTSMITH_MODEL=gpt-5.6-sol`).
 
 ## License policy
 

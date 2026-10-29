@@ -263,6 +263,53 @@ describe("assimilation trust boundaries", () => {
     expect(mocks.executeHooks).not.toHaveBeenCalled();
   });
 
+  it("reports a fallback analysis as a failure and does not cache it", async () => {
+    const root = await temporaryDirectory();
+    await fs.writeFile(path.join(root, "LICENSE"), "MIT License", "utf-8");
+    mocks.scan.mockResolvedValue(makeScan(root));
+    mocks.loadConfig.mockResolvedValue({
+      verbose: false,
+      instructions: true,
+      singleAgent: false,
+      cache: true,
+      cacheTtlSeconds: 86400,
+      outputSource: "default",
+    });
+    mocks.localAnalyze.mockResolvedValue({
+      ...makeAnalysis(),
+      fallbackReason: 'Model "gpt-5" is not available.',
+    });
+
+    await assimilateCommand(root, {});
+
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(process.exitCode).toBe(1);
+    expect(mocks.generate).toHaveBeenCalledOnce();
+    expect(mocks.cacheSet).not.toHaveBeenCalled();
+    expect(output).toContain('Copilot analysis failed: Model "gpt-5" is not available.');
+    expect(output).not.toContain("[COMPLETE]");
+    expect(output).not.toContain("has been assimilated");
+  });
+
+  it("reports a remote fallback analysis as a failure", async () => {
+    mocks.getRepoInfo.mockResolvedValue({
+      owner: "example",
+      repo: "public-repo",
+      defaultBranch: "main",
+    });
+    mocks.remoteAnalyze.mockResolvedValue({
+      ...makeAnalysis(),
+      fallbackReason: "the response was not valid analysis JSON",
+    });
+
+    await assimilateCommand("https://github.com/example/public-repo", {});
+
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(process.exitCode).toBe(1);
+    expect(output).toContain("Copilot analysis failed: the response was not valid analysis JSON");
+    expect(output).not.toContain("has been assimilated");
+  });
+
   it("executes post-generate hooks when --run-hooks is opted into", async () => {
     const root = await temporaryDirectory();
     const currentHook = {

@@ -3,7 +3,19 @@ import { describe, expect, it } from "vitest";
 import {
   createSecureAnalysisSessionConfig,
   denyAllAnalysisPermissions,
+  resolveAnalysisModel,
 } from "../../src/analyzer/session-security.js";
+
+describe("resolveAnalysisModel", () => {
+  it("uses AGENTSMITH_MODEL when set", () => {
+    expect(resolveAnalysisModel({ AGENTSMITH_MODEL: " gpt-5.6-sol " })).toBe("gpt-5.6-sol");
+  });
+
+  it("leaves the model to Copilot's default when unset or blank", () => {
+    expect(resolveAnalysisModel({})).toBeUndefined();
+    expect(resolveAnalysisModel({ AGENTSMITH_MODEL: "   " })).toBeUndefined();
+  });
+});
 
 describe("analysis session security", () => {
   it("rejects every permission request", async () => {
